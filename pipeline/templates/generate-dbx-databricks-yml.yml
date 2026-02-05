@@ -14,80 +14,171 @@ parameters:
 
 steps:
 - task: PowerShell@2
-  displayName: 'Generate databricks.yml from job and pipeline YAMLs'
+  displayName: 'Update databricks.yml with discovered jobs/pipelines'
   inputs:
     targetType: inline
     script: |
-      $repoDir        = "${{ parameters.repositoryDir }}"
-      $outputPath     = "${{ parameters.outputDatabricksYml }}"
-      $jobsFolder     = "${{ parameters.jobsFolder }}"
-      $pipelinesFolder= "${{ parameters.pipelinesFolder }}"
+      $ErrorActionPreference = 'Stop'
+
+      function Ensure-YamlModule {
+        if (-not (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue) -or -not (Get-Command ConvertTo-Yaml -ErrorAction SilentlyContinue)) {
+          Write-Host "ConvertFrom-Yaml/ConvertTo-Yaml not found; installing powershell-yaml module..."
+          try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Install-Module powershell-yaml -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            Import-Module powershell-yaml -ErrorAction Stop
+          } catch {
+            Write-Error "Failed to install/import powershell-yaml: $($_.Exception.Message)"; exit 1
+          }
+          if (-not (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue) -or -not (Get-Command ConvertTo-Yaml -ErrorAction SilentlyContinue)) {
+            Write-Error "powershell-yaml installed but ConvertFrom-Yaml/ConvertTo-Yaml still unavailable."; exit 1
+          }
+        }
+      }
+
+      function Get-MapKeys {
+        param($map)
+        if ($null -eq $map) { return @() }
+        if ($map -is [System.Collections.IDictionary]) { return @($map.Keys) }
+        return @($map.PSObject.Properties.Name)
+      }
+
+      function To-StringList {
+        param($value)
+        if ($null -eq $value) { return @() }
+        if ($value -is [System.Collections.IEnumerable] -and -not ($value -is [string])) { return @($value) }
+        return @("$value")
+      }
+
+      function Get-RelativePath {
+        param([string]$basePath, [string]$fullPath)
+        $relative = $fullPath.Substring($basePath.Length).TrimStart('\','/')
+        return ($relative -replace '\\','/')
+      }
+
+      function Load-Yaml {
+        param([string]$path)
+        try {
+          $raw = Get-Content $path -Raw
+          if (-not $raw.Trim()) { return $null }
+          return $raw | ConvertFrom-Yaml
+        } catch {
+          Write-Warning "Failed to parse YAML at $path: $($_.Exception.Message)"
+          return $null
+        }
+      }
+
+      $repoDir         = "${{ parameters.repositoryDir }}"
+      $outputPath      = "${{ parameters.outputDatabricksYml }}"
+      $jobsFolder      = "${{ parameters.jobsFolder }}"
+      $pipelinesFolder = "${{ parameters.pipelinesFolder }}"
+
+      if (-not $outputPath) {
+        $outputPath = Join-Path $repoDir "databricks.yml"
+      }
 
       Write-Host "Repository: $repoDir"
-      Write-Host "Output databricks.yml: $outputPath"
+      Write-Host "databricks.yml: $outputPath"
 
-      $jobsRoot      = Join-Path $repoDir $jobsFolder
+      if (-not (Test-Path $outputPath)) {
+        Write-Error "databricks.yml not found at $outputPath; cannot update."
+        exit 1
+      }
+
+      Ensure-YamlModule
+
+      $cfg = Load-Yaml -path $outputPath
+      if ($null -eq $cfg) { $cfg = @{} }
+
+      if (-not $cfg.resources) { $cfg | Add-Member -MemberType NoteProperty -Name resources -Value @{} }
+      if (-not $cfg.resources.jobs) { $cfg.resources | Add-Member -MemberType NoteProperty -Name jobs -Value @{} }
+      if (-not $cfg.resources.pipelines) { $cfg.resources | Add-Member -MemberType NoteProperty -Name pipelines -Value @{} }
+
+      $existingJobs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+      foreach ($name in (Get-MapKeys $cfg.resources.jobs)) { $existingJobs.Add($name) | Out-Null }
+
+      $existingPipelines = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+      foreach ($name in (Get-MapKeys $cfg.resources.pipelines)) { $existingPipelines.Add($name) | Out-Null }
+
+      $jobsRoot = Join-Path $repoDir $jobsFolder
       $pipelinesRoot = Join-Path $repoDir $pipelinesFolder
-
-      if (-not (Test-Path $jobsRoot)) {
-        Write-Warning "Jobs folder not found: $jobsRoot"
-      }
-      if (-not (Test-Path $pipelinesRoot)) {
-        Write-Warning "Pipelines folder not found: $pipelinesRoot"
-      }
 
       $jobFiles = @()
       if (Test-Path $jobsRoot) {
-        $jobFiles = Get-ChildItem -Path $jobsRoot -Filter '*.yml' -Recurse
+        $jobFiles = Get-ChildItem -Path $jobsRoot -Recurse -File | Where-Object { $_.Extension -in '.yml','.yaml' }
+      } else {
+        Write-Warning "Jobs folder not found: $jobsRoot"
       }
 
       $pipelineFiles = @()
       if (Test-Path $pipelinesRoot) {
-        $pipelineFiles = Get-ChildItem -Path $pipelinesRoot -Filter '*.yml' -Recurse
+        $pipelineFiles = Get-ChildItem -Path $pipelinesRoot -Recurse -File | Where-Object { $_.Extension -in '.yml','.yaml' }
+      } else {
+        Write-Warning "Pipelines folder not found: $pipelinesRoot"
       }
 
-      $lines = @()
-      $lines += 'bundle:'
-      $lines += '  name: datafabric-bundle'
-      $lines += ''
-      $lines += 'resources:'
-      $lines += '  jobs:'
+      $includeList = To-StringList $cfg.include
+      $includeSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+      foreach ($item in $includeList) { $includeSet.Add($item) | Out-Null }
+
+      $includeToAdd = New-Object System.Collections.Generic.List[string]
 
       foreach ($job in $jobFiles) {
-        $name = [System.IO.Path]::GetFileNameWithoutExtension($job.Name)
-        $relativePath = $job.FullName.Substring($repoDir.Length).TrimStart('\\','/')
-        $relativePath = $relativePath -replace '\\','/'
+        $jobCfg = Load-Yaml -path $job.FullName
+        if ($null -eq $jobCfg) { continue }
+        $jobNames = Get-MapKeys $jobCfg.resources.jobs
+        if ($jobNames.Count -eq 0) { continue }
 
-        $lines += "    $name:"
-        $lines += "      definition_file: ./$relativePath"  # Adjust to match DAB schema you use
-      }
+        $needsInclude = $false
+        foreach ($name in $jobNames) {
+          if (-not $existingJobs.Contains($name)) { $needsInclude = $true }
+        }
 
-      if ($pipelineFiles.Count -gt 0) {
-        $lines += ''
-        $lines += '  pipelines:'
-
-        foreach ($pipe in $pipelineFiles) {
-          $name = [System.IO.Path]::GetFileNameWithoutExtension($pipe.Name)
-          $relativePath = $pipe.FullName.Substring($repoDir.Length).TrimStart('\\','/')
-          $relativePath = $relativePath -replace '\\','/'
-
-          $lines += "    $name:"
-          $lines += "      definition_file: ./$relativePath"  # Adjust to match DAB schema you use
+        if ($needsInclude) {
+          $includeToAdd.Add((Get-RelativePath -basePath $repoDir -fullPath $job.FullName))
+          foreach ($name in $jobNames) { $existingJobs.Add($name) | Out-Null }
         }
       }
 
-      # Optional: append variables/targets from a static template if you want
-      $targetsTemplate = Join-Path $repoDir 'databricks.targets.yml'
-      if (Test-Path $targetsTemplate) {
-        Write-Host "Appending targets from: $targetsTemplate"
-        $lines += ''
-        $lines += Get-Content $targetsTemplate
+      foreach ($pipe in $pipelineFiles) {
+        $pipeCfg = Load-Yaml -path $pipe.FullName
+        if ($null -eq $pipeCfg) { continue }
+        $pipeNames = Get-MapKeys $pipeCfg.resources.pipelines
+        if ($pipeNames.Count -eq 0) { continue }
+
+        $needsInclude = $false
+        foreach ($name in $pipeNames) {
+          if (-not $existingPipelines.Contains($name)) { $needsInclude = $true }
+        }
+
+        if ($needsInclude) {
+          $includeToAdd.Add((Get-RelativePath -basePath $repoDir -fullPath $pipe.FullName))
+          foreach ($name in $pipeNames) { $existingPipelines.Add($name) | Out-Null }
+        }
       }
 
-      $outputDir = Split-Path $outputPath -Parent
-      if (-not (Test-Path $outputDir)) {
-        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+      if ($includeToAdd.Count -eq 0) {
+        Write-Host "No new job or pipeline resources found; databricks.yml unchanged."
+        return
       }
 
-      $lines | Set-Content -Path $outputPath -Encoding UTF8
-      Write-Host "Generated databricks.yml at: $outputPath"
+      $addedCount = 0
+      foreach ($path in ($includeToAdd | Sort-Object -Unique)) {
+        if (-not $includeSet.Contains($path)) {
+          Write-Host "Adding include: $path"
+          $includeList += $path
+          $includeSet.Add($path) | Out-Null
+          $addedCount++
+        }
+      }
+
+      if ($addedCount -eq 0) {
+        Write-Host "All discovered resources already included; databricks.yml unchanged."
+        return
+      }
+
+      $cfg.include = $includeList
+      $updatedYaml = $cfg | ConvertTo-Yaml -Depth 50
+      Set-Content -Path $outputPath -Value $updatedYaml -Encoding UTF8
+      Write-Host "Updated databricks.yml with $addedCount include(s)."

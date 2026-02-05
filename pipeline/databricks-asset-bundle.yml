@@ -159,6 +159,26 @@ stages:
             parameters:
               deployment_type: '${{ parameters.deployment_type }}'
 
+          # AI-assisted databricks.yml generation (discover jobs/pipelines)
+          - template: templates/ai-generate-databricks-yml.yml
+            parameters:
+              azureServiceConnection: 'azure-devops-sp2'
+              azureOpenAIEndpoint: '$(azureOpenAIEndpoint)'
+              azureOpenAIDeployment: '$(azureOpenAIDeployment)'
+              repositoryDir: '$(REPO_DIR)'
+              outputDatabricksYml: '$(REPO_DIR)/databricks.yml'
+              jobsFolder: 'jobs'
+              pipelinesFolder: 'pipeline-jobs'
+              skipCheckout: true
+
+          # Ensure any missing job/pipeline includes are added deterministically
+          - template: templates/generate-dbx-databricks-yml.yml
+            parameters:
+              repositoryDir: '$(REPO_DIR)'
+              outputDatabricksYml: '$(REPO_DIR)/databricks.yml'
+              jobsFolder: 'jobs'
+              pipelinesFolder: 'pipeline-jobs'
+
           # Validate bundle
           #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
           - template: templates/validate-dbx-bundle.yml
