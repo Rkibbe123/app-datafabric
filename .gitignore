@@ -1,0 +1,5 @@
+# Ignore extra parser info
+notebooks/code/datafabric/parsers/
+
+# Ignore certain test notebooks
+"notebooks/code/datafabric/miscellaneous/CDC Source Table Count Validation to Client Database for Split process"

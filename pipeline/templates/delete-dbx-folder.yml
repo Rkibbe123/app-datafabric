@@ -1,0 +1,152 @@
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: databricksHost
+    type: string
+    default: ''
+  - name: databricksToken
+    type: string
+  - name: resourceGroup
+    type: string
+    default: ''
+  - name: workspaceName
+    type: string
+    default: ''
+  - name: repositoryDir
+    type: string
+    default: '$(Build.SourcesDirectory)'
+  - name: target
+    type: string
+    default: 'dev'
+  - name: clean_bundle-root
+    type: boolean
+    default: false
+
+steps:
+- task: AzureCLI@2
+  displayName: 'Databricks workspace delete (optional)'
+  condition: and(succeeded(), eq('${{ parameters['clean_bundle-root'] }}', 'true'))
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    addSpnToEnvironment: true
+    scriptType: ps
+    scriptLocation: inlineScript
+    inlineScript: |
+      $ErrorActionPreference = 'Continue'
+      # Resolve databricks.exe location (prefer installed path under sources, fallback to C:\ scan)
+      $preferredExe = Join-Path "$(Build.SourcesDirectory)" "databricks-cli/databricks.exe"
+      if (Test-Path $preferredExe) {
+        $exePath = $preferredExe
+      } else {
+        $exePath = Get-ChildItem -Path C:\ -Recurse -Filter "databricks.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+      }
+      if (-not $exePath) { Write-Error "Databricks CLI binary not found."; exit 1 }
+      Write-Host "Databricks CLI: $exePath"
+      $installDir = Split-Path $exePath
+      $env:PATH = "$installDir;$env:PATH"
+
+      # Determine host
+      $hostParam = "${{ parameters.databricksHost }}".Trim()
+      if (-not $hostParam) {
+        if (-not "${{ parameters.resourceGroup }}" -or -not "${{ parameters.workspaceName }}") {
+          Write-Error "databricksHost not provided and resourceGroup/workspaceName missing to resolve it."; exit 1
+        }
+        $workspaceUrl = az databricks workspace show --resource-group "${{ parameters.resourceGroup }}" --name "${{ parameters.workspaceName }}" --query workspaceUrl -o tsv
+        if (-not $workspaceUrl) { Write-Error "Could not resolve workspaceUrl via az cli."; exit 1 }
+        $hostParam = "https://$workspaceUrl"
+      }
+      Write-Host "Databricks host: $hostParam"
+
+      # Clean any Azure auth env to avoid mixed auth
+      Remove-Item Env:DATABRICKS_AZURE_RESOURCE_ID -ErrorAction SilentlyContinue
+      Remove-Item Env:ARM_CLIENT_ID -ErrorAction SilentlyContinue
+      Remove-Item Env:ARM_CLIENT_SECRET -ErrorAction SilentlyContinue
+      Remove-Item Env:ARM_TENANT_ID -ErrorAction SilentlyContinue
+      $env:DATABRICKS_AUTH_TYPE = "pat"
+
+      # Write CLI config locally
+      $cliConfig = Join-Path "$(Build.SourcesDirectory)" ".databrickscfg"
+      @"
+      [DEFAULT]
+      host = $hostParam
+      token = ${{ parameters.databricksToken }}
+      "@ | Set-Content $cliConfig
+      $env:DATABRICKS_CONFIG_FILE = $cliConfig
+      $env:DATABRICKS_CONFIG_PROFILE = "DEFAULT"
+      Write-Host "Wrote CLI config to $cliConfig"
+
+      # If requested, delete bundle root_path entries from databricks.yml (dev/test/prod targets)
+      $cleanBundle = [System.Convert]::ToBoolean('${{ parameters['clean_bundle-root'] }}')
+      if ($cleanBundle) {
+        $bundlePath = Join-Path "${{ parameters.repositoryDir }}" "databricks.yml"
+        if (-not (Test-Path $bundlePath)) { Write-Error "cleanBundleRoots=true but databricks.yml not found at $bundlePath"; exit 1 }
+
+        if (-not (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue)) {
+          Write-Host "ConvertFrom-Yaml not found; installing powershell-yaml module..."
+          try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Install-Module powershell-yaml -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            Import-Module powershell-yaml -ErrorAction Stop
+          } catch {
+            Write-Error "Failed to install/import powershell-yaml: $($_.Exception.Message)"; exit 1
+          }
+          if (-not (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue)) {
+            Write-Error "powershell-yaml installed but ConvertFrom-Yaml still unavailable."; exit 1
+          }
+        }
+
+        $cfg = Get-Content $bundlePath -Raw | ConvertFrom-Yaml
+        $targets = $cfg.targets
+
+        $entries = @()
+        switch ('${{ parameters.target }}'.ToLower()) {
+          'dev'  { $entries += @{ name = 'dev';  path = $targets.dev.workspace.root_path } }
+          'test' { $entries += @{ name = 'test'; path = $targets.test.workspace.root_path } }
+          'prod' { $entries += @{ name = 'prod'; path = $targets.prod.workspace.root_path } }
+          default {
+            Write-Warning "Unknown target '${{ parameters.target }}'; skipping deletes"
+          }
+        }
+
+        foreach ($entry in $entries) {
+          $p = ($entry.path | ForEach-Object { $_ })
+          if (-not $p) { Write-Host "No root_path for $($entry.name); skipping"; continue }
+          $p = $p.Trim()
+          if ($p -notlike "/?*") { $p = "/$p" }
+          Write-Host ("Checking bundle root for target {0}: {1}" -f $entry.name, $p)
+          $exists = $false
+          $statusOutput = & databricks workspace get-status "$p" 2>&1
+          $statusCode = $LASTEXITCODE
+          $LASTEXITCODE = 0
+          if ($statusCode -eq 0) {
+            $exists = $true
+          } elseif ($statusOutput -match "(NOT_FOUND|doesn't exist|No such object)") {
+            Write-Host "Path already absent for $($entry.name); skipping delete"
+            $exists = $false
+          } else {
+            Write-Error ("Failed to check status for {0}: {1}" -f $p, $statusOutput); exit 1
+          }
+
+          if ($exists) {
+            Write-Host ("Deleting bundle root for target {0}: {1}" -f $entry.name, $p)
+            $deleteOutput = & databricks workspace delete --recursive "$p" 2>&1
+            $deleteCode = $LASTEXITCODE
+            $LASTEXITCODE = 0
+            if ($deleteCode -eq 0) {
+              Write-Host ("Deleted {0}" -f $p)
+            } elseif ($deleteOutput -match "(NOT_FOUND|doesn't exist|No such object)") {
+              Write-Host "Path disappeared during delete; treating as success"
+            } else {
+              Write-Error ("Delete failed for {0}: {1}" -f $p, $deleteOutput); exit 1
+            }
+          }
+        }
+      }
+
+      # No explicit folderPath handling; rely on clean_bundle-root to delete roots from databricks.yml targets.
+  env:
+    DATABRICKS_HOST: ${{ parameters.databricksHost }}
+    DATABRICKS_TOKEN: ${{ parameters.databricksToken }}
+    DATABRICKS_BUNDLE_TARGET: ${{ parameters.target }}
+    TARGET: ${{ parameters.target }}

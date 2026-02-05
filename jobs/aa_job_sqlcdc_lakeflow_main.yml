@@ -1,0 +1,66 @@
+resources:
+  jobs:
+    aa_job_sqlcdc_lakeflow_main:
+      name: aa_job_sqlcdc_lakeflow_main
+      max_concurrent_runs: 5
+      tasks:
+        - task_key: GetConfigData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigData
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: CheckExistingPipelineCount
+          depends_on:
+            - task_key: GetConfigData
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.GetConfigData.values.existing_pipeline_config_count}}"
+            right: "0"
+        - task_key: ProcessExistingPipelines
+          depends_on:
+            - task_key: CheckExistingPipelineCount
+              outcome: "true"
+          for_each_task:
+            inputs: "{{tasks.GetConfigData.values.existing_pipeline_config_list}}"
+            concurrency: 10
+            task:
+              task_key: ProcessExistingPipelines_iteration
+              run_job_task:
+                job_id: 91009072870674
+                job_parameters:
+                  p_ingestion_pipeline_name: "{{input}}"
+        - task_key: CheckNewPipelineCount
+          depends_on:
+            - task_key: GetConfigData
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.GetConfigData.values.new_pipeline_config_count}}"
+            right: "0"
+        - task_key: ProcessNewPipelines
+          depends_on:
+            - task_key: CheckNewPipelineCount
+              outcome: "true"
+          for_each_task:
+            inputs: "{{tasks.GetConfigData.values.new_pipeline_config_list}}"
+            concurrency: 10
+            task:
+              task_key: ProcessNewPipelines_iteration
+              run_job_task:
+                job_id: 990128083064433
+                job_parameters:
+                  p_ingestion_pipeline_name: "{{input}}"
+      queue:
+        enabled: true
+      parameters:
+        - name: p_environment
+          default: dev
+        - name: p_internal_client_id
+          default: ""
+        - name: p_internal_facility_id
+          default: ""
+        - name: p_internal_product_id
+          default: "27"
+        - name: p_source_database_name
+          default: ""
+        - name: p_source_server_name
+          default: lewvpalyedb04.nthext.com

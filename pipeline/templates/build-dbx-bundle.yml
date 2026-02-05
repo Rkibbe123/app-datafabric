@@ -1,0 +1,128 @@
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: databricksResourceId
+    type: string
+  - name: databricksHost
+    type: string
+  - name: armClientId
+    type: string
+  - name: armClientSecret
+    type: string
+  - name: armTenantId
+    type: string
+  - name: workspaceName
+    type: string
+  - name: databrickstoken
+    type: string
+
+
+steps:
+- task: AzureCLI@2
+  displayName: 'Build Databricks Bundle'
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    addSpnToEnvironment: true
+    scriptType: ps
+    scriptLocation: inlineScript
+    inlineScript: |
+      # Set working directory to source root before any CLI/config operations
+
+      Set-Location "$(Build.SourcesDirectory)"
+
+      PWD
+
+      ls
+
+      # Find Databricks CLI exe anywhere on C: drive
+
+      $exePath = Get-ChildItem -Path C:\ -Recurse -Filter "databricks.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+
+      if (-not $exePath) { Write-Error "Databricks CLI binary not found on C: drive!"; exit 1 }
+
+      Write-Host "Databricks CLI binary found at $exePath"
+
+      # Set $installDir to the directory containing the exe
+
+      $installDir = Split-Path $exePath
+
+      # Get workspace URL
+
+      $workspaceUrl = az databricks workspace show --resource-group "${{ parameters.resourceGroup }}" --name "${{ parameters.workspaceName }}" --query workspaceUrl -o tsv
+
+      $DATABRICKS_HOST = "https://$workspaceUrl"
+
+      echo "##vso[task.setvariable variable=DATABRICKS_HOST]$DATABRICKS_HOST"
+
+      Write-Host "Workspace URL: $DATABRICKS_HOST"
+
+      # Prepare .databrickscfg path using PAT
+
+      #$env:DATABRICKS_TOKEN = "${{ parameters.databrickstoken}}"
+      #Write-Host "token: $env:DATABRICKS_TOKEN"
+
+      $profilePath = "$installDir\.databrickscfg"
+
+      $profileContent = "[DEFAULT]`r`nhost = $DATABRICKS_HOST`r`ntoken = $env:DATABRICKS_TOKEN"
+
+      $profileContent | Set-Content -Path $profilePath
+
+      Write-Host "PAT-based .databrickscfg created at $profilePath"
+
+ 
+      # Set config file env var
+
+      $env:DATABRICKS_CONFIG_FILE = "$profilePath"
+
+      echo "##vso[task.setvariable variable=DATABRICKS_CONFIG_FILE]$profilePath"
+
+      Write-Host "Contents of .databrickscfg:"
+
+      Get-Content $profilePath
+
+
+      # Build the bundle
+
+      & $exePath bundle build
+
+      Write-Host "Databricks bundle build completed."
+ 
+
+      # Locate the bundle output directory
+
+      $bundleDir = Join-Path -Path $PWD.Path -ChildPath ".bundle"
+
+      if (Test-Path $bundleDir) {
+
+        Write-Host "Bundle directory found at $bundleDir"
+
+        echo "##vso[task.setvariable variable=BUILT_BUNDLE_PATH]$bundleDir"
+
+      } else {
+
+        Write-Warning "Bundle directory not found. Check build output."
+
+      }
+
+
+      # Optionally, validate the bundle
+
+      & $exePath bundle validate -t dev -p DEFAULT | Out-File validate.json
+
+      Write-Host "Validation results:"
+
+      Get-Content validate.json
+
+      Remove-Item validate.json
+
+ 
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Databricks Bundle Artifact'
+  inputs:
+    PathtoPublish: '$(BUILT_BUNDLE_PATH)'
+    ArtifactName: 'databricks-bundle'
+    publishLocation: 'Container'
+

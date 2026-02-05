@@ -1,0 +1,58 @@
+parameters:
+  - name: deployment_type
+    type: string
+
+steps:
+- powershell: |
+    $version = "v0.275.0"
+    
+    $downloadUrl = "https://github.com/databricks/cli/releases/download/$version/databricks_cli_0.275.0_windows_amd64.zip"
+    $installDir = "$(Build.SourcesDirectory)\databricks-cli"
+
+    # Clean up previous installation if it exists
+    if (Test-Path $installDir) {
+        Write-Host "Removing existing databricks-cli directory: $installDir"
+        Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Host "Downloading Databricks CLI from $downloadUrl"
+   
+    # Remove existing zip file if present
+    if (Test-Path "databricks_cli.zip") {
+        Remove-Item "databricks_cli.zip" -Force
+    }
+   
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile "databricks_cli.zip"
+        Write-Host "Download completed successfully"
+       
+        # Create install directory
+        New-Item -Path $installDir -ItemType Directory -Force | Out-Null
+       
+        Write-Host "Extracting to $installDir"
+        Expand-Archive -Path "databricks_cli.zip" -DestinationPath $installDir -Force
+       
+        Write-Host "Contents of $installDir after extraction:"
+        Get-ChildItem -Path $installDir -Recurse
+       
+        # Locate the binary
+        $exePath = Get-ChildItem -Path $installDir -Recurse -Filter "databricks.exe" | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1 -ExpandProperty FullName
+   
+        if (-not $exePath) {
+            Write-Error "Databricks CLI binary not found after extraction!"
+            exit 1
+        }
+   
+        Write-Host "Databricks CLI binary found at $exePath"
+        $env:PATH = "$($installDir);$env:PATH"
+        & $exePath --version
+       
+        # Clean up zip file
+        Remove-Item "databricks_cli.zip" -Force -ErrorAction SilentlyContinue
+       
+    } catch {
+        Write-Error "Failed to download or extract Databricks CLI: $($_.Exception.Message)"
+        exit 1
+    }
+
+  displayName: 'Install Databricks CLI (New)'

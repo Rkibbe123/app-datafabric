@@ -1,0 +1,207 @@
+parameters:
+
+  - name: azureSubscription
+
+    type: string
+
+  - name: resourceGroup
+
+    type: string
+
+  - name: databricksResourceId
+
+    type: string
+
+  - name: databricksHost
+
+    type: string
+
+  - name: armClientId
+
+    type: string
+
+  - name: armClientSecret
+
+    type: string
+
+  - name: armTenantId
+
+    type: string
+
+  - name: workspaceName
+
+    type: string
+
+steps:
+- task: AzureCLI@2
+  displayName: 'Validate Databricks Bundle Config'
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    addSpnToEnvironment: true
+    scriptType: ps
+    scriptLocation: inlineScript
+    inlineScript: |
+      # Download Databricks CLI
+      #$version = "v0.275.0"
+      #$downloadUrl = "https://github.com/databricks/cli/releases/download/$version/databricks_cli_0.275.0_windows_amd64.zip"
+      #$installDir = "$env:BUILD_SOURCESDIRECTORY\databricks-cli"
+      #Write-Host "Downloading Databricks CLI from $downloadUrl"
+      #Invoke-WebRequest -Uri $downloadUrl -OutFile "databricks_cli.zip"
+      #Expand-Archive -Path "databricks_cli.zip" -DestinationPath $installDir -Force
+
+      $exePath = Get-ChildItem -Path $installDir -Recurse -Filter "databricks.exe" | Select-Object -First 1 -ExpandProperty FullName
+
+      if (-not $exePath) { Write-Error "Databricks CLI binary not found!"; exit 1 }
+      Write-Host "Databricks CLI binary found at $exePath"
+     
+      # Ensure latest Az modules are installed and imported
+
+      #try {
+        #Update-Module Az.* -Force -ErrorAction Stop
+      #} catch {
+        #Install-Module Az -Force -Scope AllUsers
+      #}
+
+      #Import-Module Az -Force
+
+      # Get workspace URL
+      $workspaceUrl = az databricks workspace show --resource-group "${{ parameters.resourceGroup }}" --name "${{ parameters.workspaceName }}" --query workspaceUrl -o tsv
+      $DATABRICKS_HOST = "https://$workspaceUrl"
+      echo "##vso[task.setvariable variable=DATABRICKS_HOST]$DATABRICKS_HOST"
+      Write-Host "Workspace URL: $DATABRICKS_HOST"
+
+      # Resolve Service Principal Object ID
+      Write-Host "Resolving Service Principal Object ID for client id..."
+      Write-Host "getting all role assignments"
+
+      $spClientId = $env:servicePrincipalId
+      $spSecret   = $env:servicePrincipalKey
+      $tenantId   = $env:tenantId
+
+      if (-not ($spClientId -and $spSecret -and $tenantId)) {
+        throw 'servicePrincipalId/servicePrincipalKey/tenantId not populated'
+      }
+
+      $secure = ConvertTo-SecureString $spSecret -AsPlainText -Force
+      $cred   = New-Object System.Management.Automation.PSCredential ($spClientId, $secure)
+      Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $cred | Out-Null
+      #$spObjectId = (Get-AzADServicePrincipal -ApplicationId $spClientId).Id
+
+      #if (-not $spObjectId) { throw "Cannot find service principal object id for $spClientId" }
+
+      #Get-AzRoleAssignment -ObjectId $spObjectId -Scope $env:DATABRICKS_AZURE_RESOURCE_ID
+
+      $managementToken = az account get-access-token --resource https://management.azure.com/ | ConvertFrom-Json
+
+      $uri = "https://management.azure.com$env:DATABRICKS_AZURE_RESOURCE_ID/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
+
+      (Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($managementToken.accessToken)" }).value | Where-Object { $_.properties.principalId -eq $spObjectId }
+
+      Write-Host "managementToken: $managementToken"
+
+      $clientId = $env:ARM_CLIENT_ID
+
+      if ([string]::IsNullOrWhiteSpace($clientId) -or $clientId -match '^\$\(.+\)$') {
+        $clientId = $env:servicePrincipalId
+      }
+
+
+      if ([string]::IsNullOrWhiteSpace($clientId)) {
+        Write-Error 'Service principal client ID is not available.'; exit 1
+      }
+
+      $spObjectId = az ad sp show --id $clientId --query id -o tsv 2>$null
+
+      if (-not $spObjectId) {
+        Write-Error 'Failed to resolve Service Principal Object ID.'; exit 1
+      }
+
+
+      Write-Host "spObjectId: $spObjectId"
+      echo "##vso[task.setvariable variable=servicePrincipalId]$spObjectId"
+      Write-Host "servicePrincipalId: $env:servicePrincipalId"
+
+      # Check SPN role assignments
+
+      Write-Host "Checking SPN role assignments for Databricks workspace..."
+      $roles = az role assignment list --assignee $spObjectId --scope $env:DATABRICKS_AZURE_RESOURCE_ID --query "[].{Role:roleDefinitionName,Scope:scope}" -o table
+      Write-Host $roles
+
+      if (-not $roles) { Write-Warning 'No role assignments found for SPN at this scope.' }
+
+      # Prepare .databrickscfg path
+      $profilePath = "$installDir\.databrickscfg"
+
+ 
+      # Attempt token acquisition
+
+      Write-Host "Attempting to acquire Azure AD token for Databricks scope..."
+      try {
+        $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$env:ARM_TENANT_ID/oauth2/v2.0/token" `
+          -Method POST `
+          -ContentType "application/x-www-form-urlencoded" `
+          -Body @{
+            client_id     = $env:ARM_CLIENT_ID
+            client_secret = $env:ARM_CLIENT_SECRET
+            scope         = "https://databricks.azure.net/.default"
+            grant_type    = "client_credentials"
+          }
+
+        if ($tokenResponse.access_token) {
+          Write-Host "Databricks token acquired successfully."
+          $env:DATABRICKS_TOKEN = $tokenResponse.access_token
+          echo "##vso[task.setvariable variable=DATABRICKS_TOKEN]$($tokenResponse.access_token)"
+
+          # Token-based profile
+          $profileContent = "[DEFAULT]`r`nhost = $DATABRICKS_HOST`r`ntoken = $env:DATABRICKS_TOKEN"
+          $profileContent | Set-Content -Path $profilePath
+
+          Write-Host "Token-based .databrickscfg created at $profilePath"
+        }
+        else { throw "Token acquisition returned no access_token." }
+      }
+      catch {
+        Write-Warning "Token acquisition failed. Falling back to SPN-based authentication."
+        $profileContent = "[DEFAULT]`r`nhost = $DATABRICKS_HOST`r`nazure_client_id = $env:ARM_CLIENT_ID`r`nazure_client_secret = $env:ARM_CLIENT_SECRET`r`nazure_tenant_id = $env:ARM_TENANT_ID`r`nazure_resource_id = $env:DATABRICKS_AZURE_RESOURCE_ID"
+        $profileContent | Set-Content -Path $profilePath
+        Write-Host "SPN-based .databrickscfg created at $profilePath"
+      }
+
+ 
+
+      # Set config file env var
+      $env:DATABRICKS_CONFIG_FILE = "$profilePath"
+      echo "##vso[task.setvariable variable=DATABRICKS_CONFIG_FILE]$profilePath"
+
+      Write-Host "Contents of .databrickscfg:"
+      Get-Content $profilePath
+
+      # Validate bundle
+      & $exePath bundle validate -t dev -p DEFAULT | Out-File validate.json
+      Write-Host "Validation results:"
+      Get-Content validate.json
+      Remove-Item validate.json
+
+      # Summary
+      Write-Host "Bundle summary:"
+      & $exePath bundle summary
+
+      # Workspace validation
+      Write-Host "Checking clusters..."
+      $clusters = & $exePath clusters list --output JSON | ConvertFrom-Json
+      if ($clusters.Count -eq 0) { Write-Error "No clusters found in the workspace." }
+      foreach ($cluster in $clusters) {
+        Write-Host ("Cluster: {0}, State: {1}" -f $cluster.cluster_name, $cluster.state)
+      }
+
+      $me = & $exePath current-user me --output JSON | ConvertFrom-Json
+
+      Write-Host ("Current user: {0} ({1})" -f $me.userName, $me.userId)
+
+
+  env:
+    DATABRICKS_HOST: ${{ parameters.databricksHost }}
+    DATABRICKS_AZURE_RESOURCE_ID: ${{ parameters.databricksResourceId }}
+    ARM_CLIENT_ID: ${{ parameters.armClientId }}
+    ARM_CLIENT_SECRET: ${{ parameters.armClientSecret }}
+    ARM_TENANT_ID: ${{ parameters.armTenantId }}

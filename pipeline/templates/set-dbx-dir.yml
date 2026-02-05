@@ -1,0 +1,68 @@
+parameters:
+  - name: deployment_type
+    type: string
+
+steps:
+- powershell: |
+    $deploymentType = "${{ parameters.deployment_type }}"
+    
+    # Try to locate the repository directory dynamically
+    $possiblePaths = @(
+        "$(Build.SourcesDirectory)",                      # If checked out directly to root or self path matches
+        "$(Build.SourcesDirectory)\$deploymentType",      # If checked out as subdirectory
+        "$(Agent.BuildDirectory)\$deploymentType",        # If checked out to sibling directory
+        "$(Agent.BuildDirectory)\s\$deploymentType"       # Standard source directory structure
+    )
+
+    $repoDir = $null
+    foreach ($path in $possiblePaths) {
+        if (Test-Path "$path\databricks.yml") {
+            $repoDir = $path
+            Write-Host "Found databricks.yml at $path"
+            break
+        }
+    }
+
+    # Backup text: check for notebooks folder if databricks.yml missing (rare but possible during initial setup?)
+    if (-not $repoDir) {
+        foreach ($path in $possiblePaths) {
+             if (Test-Path "$path\notebooks") {
+                 $repoDir = $path
+                 Write-Host "Found notebooks directory at $path"
+                 break
+             }
+        }
+    }
+
+    if (-not $repoDir) {
+         Write-Warning "Could not automatically locate repository root containing databricks.yml. Defaulting to $(Build.SourcesDirectory)\$deploymentType"
+         $repoDir = "$(Build.SourcesDirectory)\$deploymentType"
+    }
+    
+    # Verify notebooks param
+    if (Test-Path "$repoDir\notebooks") {
+         Get-ChildItem "$repoDir\notebooks" -Directory
+    } else {
+         Write-Warning "Notebooks directory not found at $repoDir"
+    }
+
+    # Set bundle name based on deployment type
+    switch ($deploymentType) {
+
+        "app-datafabric" { $bundleName = "datafabric-bundle" }
+        "app-claimsanalyzer" { $bundleName = "cla-bundle" }
+        "app-contractanalyzer" { $bundleName = "contract-bundle" }
+        default {
+            Write-Error "Unknown deployment type: $deploymentType"
+            exit 1
+        }
+    }
+
+    # Export variables for later steps
+    Write-Host "##vso[task.setvariable variable=REPO_DIR]$repoDir"
+    Write-Host "##vso[task.setvariable variable=BUNDLE_NAME]$bundleName"
+
+    Write-Host "Repository Directory: $repoDir"
+    Write-Host "Bundle Name: $bundleName"
+    Write-Host "Deployment Type: $deploymentType"
+  displayName: 'Set Repository Variables (Using Pipeline Repo)'

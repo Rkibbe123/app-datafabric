@@ -1,0 +1,93 @@
+parameters:
+  - name: repositoryDir
+    type: string
+    default: '$(Build.SourcesDirectory)/app-datafabric'
+  - name: outputDatabricksYml
+    type: string
+    default: '$(Build.SourcesDirectory)/app-datafabric/databricks.yml'
+  - name: jobsFolder
+    type: string
+    default: 'jobs'
+  - name: pipelinesFolder
+    type: string
+    default: 'pipeline-jobs'
+
+steps:
+- task: PowerShell@2
+  displayName: 'Generate databricks.yml from job and pipeline YAMLs'
+  inputs:
+    targetType: inline
+    script: |
+      $repoDir        = "${{ parameters.repositoryDir }}"
+      $outputPath     = "${{ parameters.outputDatabricksYml }}"
+      $jobsFolder     = "${{ parameters.jobsFolder }}"
+      $pipelinesFolder= "${{ parameters.pipelinesFolder }}"
+
+      Write-Host "Repository: $repoDir"
+      Write-Host "Output databricks.yml: $outputPath"
+
+      $jobsRoot      = Join-Path $repoDir $jobsFolder
+      $pipelinesRoot = Join-Path $repoDir $pipelinesFolder
+
+      if (-not (Test-Path $jobsRoot)) {
+        Write-Warning "Jobs folder not found: $jobsRoot"
+      }
+      if (-not (Test-Path $pipelinesRoot)) {
+        Write-Warning "Pipelines folder not found: $pipelinesRoot"
+      }
+
+      $jobFiles = @()
+      if (Test-Path $jobsRoot) {
+        $jobFiles = Get-ChildItem -Path $jobsRoot -Filter '*.yml' -Recurse
+      }
+
+      $pipelineFiles = @()
+      if (Test-Path $pipelinesRoot) {
+        $pipelineFiles = Get-ChildItem -Path $pipelinesRoot -Filter '*.yml' -Recurse
+      }
+
+      $lines = @()
+      $lines += 'bundle:'
+      $lines += '  name: datafabric-bundle'
+      $lines += ''
+      $lines += 'resources:'
+      $lines += '  jobs:'
+
+      foreach ($job in $jobFiles) {
+        $name = [System.IO.Path]::GetFileNameWithoutExtension($job.Name)
+        $relativePath = $job.FullName.Substring($repoDir.Length).TrimStart('\\','/')
+        $relativePath = $relativePath -replace '\\','/'
+
+        $lines += "    $name:"
+        $lines += "      definition_file: ./$relativePath"  # Adjust to match DAB schema you use
+      }
+
+      if ($pipelineFiles.Count -gt 0) {
+        $lines += ''
+        $lines += '  pipelines:'
+
+        foreach ($pipe in $pipelineFiles) {
+          $name = [System.IO.Path]::GetFileNameWithoutExtension($pipe.Name)
+          $relativePath = $pipe.FullName.Substring($repoDir.Length).TrimStart('\\','/')
+          $relativePath = $relativePath -replace '\\','/'
+
+          $lines += "    $name:"
+          $lines += "      definition_file: ./$relativePath"  # Adjust to match DAB schema you use
+        }
+      }
+
+      # Optional: append variables/targets from a static template if you want
+      $targetsTemplate = Join-Path $repoDir 'databricks.targets.yml'
+      if (Test-Path $targetsTemplate) {
+        Write-Host "Appending targets from: $targetsTemplate"
+        $lines += ''
+        $lines += Get-Content $targetsTemplate
+      }
+
+      $outputDir = Split-Path $outputPath -Parent
+      if (-not (Test-Path $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+      }
+
+      $lines | Set-Content -Path $outputPath -Encoding UTF8
+      Write-Host "Generated databricks.yml at: $outputPath"

@@ -1,0 +1,92 @@
+# Template: ai-generate-databricks-yml.yml
+# Purpose: Use AI agent to analyze repo and dynamically generate databricks.yml at repo root
+
+parameters:
+  - name: azureOpenAIEndpoint
+    type: string
+  - name: azureOpenAIDeployment
+    type: string
+  - name: azureServiceConnection
+    type: string
+    default: 'azure-devops-sp2'
+
+steps:
+  - checkout: self
+    displayName: 'Checkout Source'
+
+  - task: AzureCLI@2
+    displayName: 'AI: Generate databricks.yml from repo contents'
+    inputs:
+      azureSubscription: ${{ parameters.azureServiceConnection }}
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        Write-Host "=== AI-Driven databricks.yml Generation ===" -ForegroundColor Cyan
+        $repoRoot = "$(Build.SourcesDirectory)"
+        $existingYml = Join-Path $repoRoot 'databricks.yml'
+        $jobsDir = Join-Path $repoRoot 'jobs'
+        $pipelinesDir = Join-Path $repoRoot 'pipeline-jobs'
+
+        # Gather resource files
+        $jobFiles = @()
+        if (Test-Path $jobsDir) {
+          $jobFiles = Get-ChildItem -Path $jobsDir -Filter *.yml -Recurse | Select-Object -ExpandProperty FullName
+        }
+        $pipelineFiles = @()
+        if (Test-Path $pipelinesDir) {
+          $pipelineFiles = Get-ChildItem -Path $pipelinesDir -Filter *.yml -Recurse | Select-Object -ExpandProperty FullName
+        }
+
+        # Read current databricks.yml (if exists)
+        $baseYml = ''
+        if (Test-Path $existingYml) {
+          $baseYml = Get-Content $existingYml -Raw
+        }
+
+        # Compose prompt for AI agent
+        $prompt = @"
+You are an expert in Databricks Asset Bundles and Azure DevOps.
+Analyze the following repository structure and resource files. Generate a new databricks.yml file that includes all jobs and pipelines found in the repo, using the current databricks.yml as a base for structure and formatting. If new jobs or pipelines are found, add them to the output. If any are missing, remove them. Only output the YAML file content.
+
+Current databricks.yml:
+$baseYml
+
+Jobs:
+$($jobFiles -join "`n")
+
+Pipelines:
+$($pipelineFiles -join "`n")
+
+For each job or pipeline, include a reference in the databricks.yml as appropriate. Do not invent resources that do not exist in the repo.
+"@
+
+        # Get Azure AD token for AI agent
+        $aiToken = az account get-access-token --resource https://ml.azure.com --query accessToken -o tsv
+        $body = @{ input = $prompt } | ConvertTo-Json -Depth 10
+        $uri = "${{ parameters.azureOpenAIEndpoint }}"
+
+        Write-Host "Calling AI agent to generate databricks.yml..."
+        $response = Invoke-RestMethod -Uri $uri -Method POST -Headers @{ "Authorization" = "Bearer $aiToken"; "Content-Type" = "application/json" } -Body $body
+
+        # Parse response (handle various formats)
+        $yml = $null
+        if ($response.output -and $response.output[0].content) {
+          $yml = $response.output[0].content[0].text
+        } elseif ($response.choices -and $response.choices[0].message) {
+          $yml = $response.choices[0].message.content
+        } elseif ($response.text) {
+          $yml = $response.text
+        } elseif ($response.content) {
+          $yml = $response.content
+        } elseif ($response -is [string]) {
+          $yml = $response
+        }
+
+        if (-not $yml) {
+          Write-Host "##vso[task.logissue type=error]AI agent did not return a valid databricks.yml"
+          exit 1
+        }
+
+        # Write new databricks.yml to repo root
+        Set-Content -Path $existingYml -Value $yml -Force
+        Write-Host "databricks.yml updated by AI agent."

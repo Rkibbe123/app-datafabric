@@ -1,0 +1,396 @@
+name: DataBricks-CICD-Pipeline-$(Date:yyyyMMdd)$(Rev:.r)
+
+parameters:
+  - name: deployment_type
+    displayName: 'Select Deployment Type'
+    type: string
+    default: 'app-datafabric'
+    values:
+      - app-datafabric
+      - app-claimsanalyzer
+      - app-contractanalyzer
+
+resources:
+  repositories:
+  - repository: self
+    clean: true
+  - repository: app-datafabric # The name used to reference this repository in the checkout step
+    type: git
+    name: "analytics/app-datafabric"
+    ref: refs/heads/feature/rkibbe/dab-latest
+  - repository: app-claimsanalyzer
+    type: git
+    name: "analytics/app-claimsanalyzer"  
+    #ref: refs/heads/feature/rkibbe/dab
+  - repository: app-contractanalyzer
+    type: git
+    name: "analytics/app-contractanalyzer"
+    #ref: refs/heads/feature/rkibbe/dab
+   
+   
+pool:
+  name: 'shared-self-hosted-win22'
+  demands:
+    - Agent.Name -equals 20230720000032-1
+    #- Agent.Name -equals 20230720000137-2
+    #- Agent.Name -equals 20230720000231-3
+ 
+trigger: none
+
+stages:
+- stage: BuildDEVDataBricks
+  displayName: "Build DEV Data Bricks"
+ 
+  variables:
+  - group: databricks-dab-pipeline
+
+  jobs:
+  - job: Initial_config
+    displayName: 'Databricks_Config'
+ 
+    steps:
+      # Conditional checkout based on deployment type
+      - checkout: self
+        displayName: 'Checkout Pipeline Repository'
+        clean: true
+
+      - checkout: app-datafabric
+        condition: eq('${{ parameters.deployment_type }}', 'app-datafabric')
+        displayName: 'Checkout datafabric Repository'
+        clean: true
+
+      - checkout: app-claimsanalyzer
+        condition: eq('${{ parameters.deployment_type }}', 'app-claimsanalyzer')
+        displayName: 'Checkout Claims Repository (feature branch)'
+        clean: true
+        
+      
+      - checkout: app-contractanalyzer
+        condition: eq('${{ parameters.deployment_type }}', 'app-contractanalyzer')
+        displayName: 'Checkout Contract Repository'
+        clean: true
+
+
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.x'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      # Install Databricks CLI with error handling
+      - task: UsePythonVersion@0
+        displayName: 'Download latest DBX CLI'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      - template: templates/install-dbx-cli.yml
+        parameters:
+          deployment_type: '${{ parameters.deployment_type }}'
+
+    # Get DBX_HOST & RESOUCEID  
+      - template: templates/get-dbx-config.yml
+        parameters:
+          #azureSubscription: $(DevazureServiceConnection)
+          azureSubscription: 'nprod-dev'
+          resourceGroup: $(dev-databricks-rg-name)
+          workspaceName: $(dev-databricks-wksp-name)
+
+    # GET DBX TOKEN
+      - template: templates/get-dbx-token.yml
+        parameters:
+          azureSubscription: 'nprod-dev'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          databricksHost: "$(DEV-DATABRICKS-URL)"
+          resourceGroup: $(dev-databricks-rg-name)
+          workspaceName: $(dev-databricks-wksp-name)
+          #armClientId: $(servicePrincipalId)
+          #armClientSecret: $(servicePrincipalKey)
+          #armTenantId: $(AzureTenantId)
+
+    # Set working dir based on parameter
+      - template: templates/set-dbx-dir.yml
+        parameters:
+          deployment_type: '${{ parameters.deployment_type }}'
+
+    # Validate bundle 
+    #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
+      - template: templates/validate-dbx-bundle.yml
+        parameters:
+          azureSubscription: 'nprod-dev'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          databricksToken: "$(DATABRICKS_TOKEN)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          resourceGroup: "$(dev-databricks-rg-name)"
+          workspaceName: "$(dev-databricks-wksp-name)"
+          #armClientId: "$(servicePrincipalId)"
+          #armClientSecret: "$(servicePrincipalKey)"
+          #armTenantId: "$(AzureTenantId)"
+          repositoryDir: "$(REPO_DIR)"
+          deployment_type: "${{ parameters.deployment_type }}"
+          target: dev
+        
+
+      # Deploy Databricks asset bundle to DEV
+      - template: templates/deploy-dbx-bundle.yml
+        parameters:
+          azureSubscription: 'nprod-dev'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          resourceGroup: "$(dev-databricks-rg-name)"
+          workspaceName: "$(dev-databricks-wksp-name)"
+          databricksToken: "$(DATABRICKS_TOKEN)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          target: dev
+          repositoryDir: "$(REPO_DIR)"
+          deployment_type: "${{ parameters.deployment_type }}"
+        
+
+        # Post-deployment smoke test: Run a Databricks notebook to verify deployment
+        #- template: templates/run-dbx-smoketest.yml
+        # parameters:
+        #    azureSubscription: nprod-dev
+        #    databricksHost: $(DATABRICKS_HOST)
+        #    smokeTestJobId: $(SMOKE_TEST_JOB_ID)
+
+- stage: BuildQAEDataBricks
+  displayName: "Build QAE Data Bricks"
+  dependsOn: BuildDEVDataBricks
+  condition: succeeded('BuildDEVDataBricks')
+ 
+  variables:
+    - group: databricks-dab-pipeline
+
+
+  jobs:
+  #- job: waitForValidation
+    #displayName: Wait for external validation
+    #timeoutInMinutes: 1440 # job times out in 1 day
+    #steps:
+    #- task: ManualValidation@0
+      #timeoutInMinutes: 1440 # task times out in 1 day
+      #inputs:
+        #notifyUsers: |
+          #Randy.Kibb1e1.ctr@finthrive.com
+          #example@example.com
+        #instructions: 'Please validate the build configuration and resume'
+
+  - job: Initial_config
+    displayName: 'Databricks_Config'
+    #dependsOn: waitForValidation
+
+    pool:
+      name: 'shared-self-hosted-win22'
+      demands:
+        - Agent.Name -equals 20230720000032-1
+ 
+    steps:
+      - checkout: app-datafabric
+        condition: eq('${{ parameters.deployment_type }}', 'app-datafabric')
+        displayName: 'Checkout datafabric Repository'
+        clean: true
+         
+
+      - checkout: app-claimsanalyzer
+        condition: eq('${{ parameters.deployment_type }}', 'app-claimsanalyzer')
+        displayName: 'Checkout Claims Repository (feature branch)'
+        clean: true
+         
+        
+      - checkout: app-contractanalyzer
+        condition: eq('${{ parameters.deployment_type }}', 'app-contractanalyzer')
+        displayName: 'Checkout Contract Repository'
+        clean: true
+         
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.x'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      # Install Databricks CLI with error handling
+      - task: UsePythonVersion@0
+        displayName: 'Download latest DBX CLI'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      - template: templates/install-dbx-cli.yml
+        parameters:
+          deployment_type: '${{ parameters.deployment_type }}'
+         
+      - template: templates/get-dbx-config.yml
+        parameters:
+          #azureSubscription: $(DevazureServiceConnection)
+          azureSubscription: 'nprod-qae'
+          resourceGroup: $(qae-databricks-rg-name)
+          workspaceName: $(qae-databricks-wksp-name)
+
+      - template: templates/get-dbx-token.yml
+        parameters:
+          azureSubscription: 'nprod-qae'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          resourceGroup: $(qae-databricks-rg-name)
+          workspaceName: $(qae-databricks-wksp-name)
+          #armClientId: $(servicePrincipalId)
+          #armClientSecret: $(servicePrincipalKey)
+          #armTenantId: $(AzureTenantId)
+          
+           
+      - template: templates/set-dbx-dir.yml
+        parameters:
+          deployment_type: '${{ parameters.deployment_type }}'
+
+    #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
+      - template: templates/validate-dbx-bundle.yml
+        parameters:
+          azureSubscription: 'nprod-qae'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          databricksToken: "$(DATABRICKS_TOKEN)"
+          resourceGroup: "$(qae-databricks-rg-name)"
+          workspaceName: "$(qae-databricks-wksp-name)"
+          #armClientId: $(servicePrincipalId)
+          #armClientSecret: $(servicePrincipalKey)
+          #armTenantId: $(AzureTenantId)
+          repositoryDir: "$(REPO_DIR)"
+          deployment_type: "${{ parameters.deployment_type }}"
+          target: test
+         
+
+      # Deploy Databricks asset bundle to QAE
+      - template: templates/deploy-dbx-bundle.yml
+        parameters:
+          azureSubscription: 'nprod-qae'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          resourceGroup: "$(qae-databricks-rg-name)"
+          workspaceName: "$(qae-databricks-wksp-name)"
+          databricksToken: "$(DATABRICKS_TOKEN)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          target: test
+          repositoryDir: "$(REPO_DIR)"
+          deployment_type: "${{ parameters.deployment_type }}"
+
+- stage: BuildPRODDataBricks
+  displayName: "Build PROD Data Bricks"
+  dependsOn: BuildQAEDataBricks
+  #condition: succeeded('BuildQAEDataBricks')
+  condition: false
+ 
+  variables:
+    - group: databricks-dab-pipeline
+
+
+  jobs:
+  #- job: waitForValidation
+    #displayName: Wait for external validation
+    #timeoutInMinutes: 1440 # job times out in 1 day
+    #steps:
+    #- task: ManualValidation@0
+      #timeoutInMinutes: 1440 # task times out in 1 day
+      #inputs:
+        #notifyUsers: |
+          #Randy.Kibb1e1.ctr@finthrive.com
+          #example@example.com
+        #instructions: 'Please validate the build configuration and resume'
+
+  - job: Initial_config
+    displayName: 'Databricks_Config'
+    #dependsOn: waitForValidation
+
+    pool:
+      name: 'shared-self-hosted-win22'
+      demands:
+        - Agent.Name -equals 20230720000032-1
+ 
+    steps:
+      - checkout: app-datafabric
+        condition: eq('${{ parameters.deployment_type }}', 'app-datafabric')
+        displayName: 'Checkout datafabric Repository'
+        clean: true
+         
+
+      - checkout: app-claimsanalyzer
+        condition: eq('${{ parameters.deployment_type }}', 'app-claimsanalyzer')
+        displayName: 'Checkout Claims Repository (feature branch)'
+        clean: true
+         
+        
+      - checkout: app-contractanalyzer
+        condition: eq('${{ parameters.deployment_type }}', 'app-contractanalyzer')
+        displayName: 'Checkout Contract Repository'
+        clean: true
+         
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.x'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      # Install Databricks CLI with error handling
+      - task: UsePythonVersion@0
+        displayName: 'Download latest DBX CLI'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      - template: templates/install-dbx-cli.yml
+        parameters:
+          deployment_type: '${{ parameters.deployment_type }}'
+         
+      - template: templates/get-dbx-config.yml
+        parameters:
+          #azureSubscription: $(DevazureServiceConnection)
+          azureSubscription: 'prod'
+          resourceGroup: $(prod-databricks-rg-name)
+          workspaceName: $(prod-databricks-wksp-name)
+
+      - template: templates/get-dbx-token.yml
+        parameters:
+          azureSubscription: 'prod'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          resourceGroup: $(prod-databricks-rg-name)
+          workspaceName: $prod-databricks-wksp-name)
+          #armClientId: $(servicePrincipalId)
+          #armClientSecret: $(servicePrincipalKey)
+          #armTenantId: $(AzureTenantId)
+          
+           
+      - template: templates/set-dbx-dir.yml
+        parameters:
+          deployment_type: '${{ parameters.deployment_type }}'
+
+    #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
+      - template: templates/validate-dbx-bundle.yml
+        parameters:
+          azureSubscription: 'prod'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          databricksToken: "$(DATABRICKS_TOKEN)"
+          resourceGroup: "$(prod-databricks-rg-name)"
+          workspaceName: "$(prod-databricks-wksp-name)"
+          #armClientId: $(servicePrincipalId)
+          #armClientSecret: $(servicePrincipalKey)
+          #armTenantId: $(AzureTenantId)
+          repositoryDir: "$(REPO_DIR)"
+          deployment_type: "${{ parameters.deployment_type }}"
+          target: test
+         
+
+      # Deploy Databricks asset bundle to PROD
+      - template: templates/deploy-dbx-bundle.yml
+        parameters:
+          azureSubscription: 'prod'
+          databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+          resourceGroup: "$(prod-databricks-rg-name)"
+          workspaceName: "$(prod-databricks-wksp-name)"
+          databricksToken: "$(DATABRICKS_TOKEN)"
+          databricksHost: "$(DATABRICKS_HOST)"
+          target: test
+          repositoryDir: "$(REPO_DIR)"
+          deployment_type: "${{ parameters.deployment_type }}"
+

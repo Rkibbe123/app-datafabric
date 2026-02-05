@@ -1,0 +1,68 @@
+resources:
+  jobs:
+    aa_job_sqlcdc_lakeflow_run_ingestion:
+      name: aa_job_sqlcdc_lakeflow_run_ingestion
+      max_concurrent_runs: 10
+      tasks:
+        - task_key: GetConfigPipelineData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigPipelineData
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: StartGatewayPipeline
+          depends_on:
+            - task_key: GetConfigPipelineData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StartGatewayPipeline
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: DelayIngestionStart
+          depends_on:
+            - task_key: StartGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/DelayIngestionStart
+            source: WORKSPACE
+        - task_key: StartIngestionPipeline
+          depends_on:
+            - task_key: DelayIngestionStart
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StartIngestionPipeline
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: StopGatewayPipeline
+          depends_on:
+            - task_key: StartIngestionPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StopGatewayPipeline
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: StoreReconciliationStats
+          depends_on:
+            - task_key: StopGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StoreReconciliationStats
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: RunDataSplit
+          depends_on:
+            - task_key: StopGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/RunDataSplit
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+      queue:
+        enabled: true
+      parameters:
+        - name: p_internal_product_id
+          default: ""
+        - name: p_source_server_name
+          default: ""
+        - name: p_source_database_name
+          default: ""
+        - name: p_internal_client_id
+          default: ""
+        - name: p_internal_facility_id
+          default: ""
+        - name: p_ingestion_pipeline_name
+          default: ""
+      performance_target: PERFORMANCE_OPTIMIZED

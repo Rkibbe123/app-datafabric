@@ -1,0 +1,196 @@
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: databricksResourceId
+    type: string
+  - name: databricksHost
+    type: string
+  - name: databricksToken
+    type: string
+  #- name: armClientId
+    #type: string
+  #- name: armClientSecret
+    #type: string
+  #- name: armTenantId
+    #type: string
+  - name: workspaceName
+    type: string
+  - name: deployment_type
+    type: string
+  - name: target
+    type: string
+    default: 'dev'
+  - name: repositoryDir
+    type: string
+    default: '$(Build.SourcesDirectory)/app-datafabric'
+
+steps:
+- task: DownloadPipelineArtifact@2
+  displayName: 'Restore Databricks bundle state'
+  inputs:
+    buildType: 'specific'
+    project: '$(System.TeamProject)'
+    pipeline: '$(System.DefinitionId)'
+    runVersion: 'latestFromBranch'
+    runBranch: '$(Build.SourceBranch)'
+    artifactName: databricks-bundle-state-${{ parameters.target }}
+    targetPath: '${{ parameters.repositoryDir }}/.databricks'
+    allowPartiallySucceededBuilds: true
+    allowFailedBuilds: false
+  continueOnError: true
+
+- task: AzureCLI@2
+  displayName: 'Validate & Deploy Databricks Bundle Config'
+  #condition: eq('${{ parameters.deployment_type }}', 'app-datafabric')
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    scriptType: ps
+    scriptLocation: inlineScript
+    inlineScript: |
+      # Set working directory from parameter and build full databricks.yml path
+      $repoDir = "${{ parameters.repositoryDir }}"
+      $databricksYml = Join-Path $repoDir "databricks.yml"
+
+      Write-Host "Repository directory parameter: $repoDir"
+      Write-Host "Explicit databricks.yml path to use: $databricksYml"
+      Write-Host "DATABRICKS_HOST:  ${{ parameters.databricksHost }}"
+      Write-Host "DATABRICKS_TOKEN:  ${{ parameters.databricksToken }}"
+      Write-Host "DATABRICKS_TOKEN variable set for Databricks authentication. Value length: $($env:DATABRICKS_TOKEN.Length)"
+
+      $cliConfig = "$env:USERPROFILE\.databrickscfg"
+
+      if (Test-Path $cliConfig) {
+        Remove-Item $cliConfig -Force -ErrorAction SilentlyContinue
+        Write-Host "Removed .databrickscfg to prevent credential/config leakage."
+      }
+
+      if (-not $env:DATABRICKS_HOST) {
+        Write-Error "Critical: DATABRICKS_HOST is missing. Cannot proceed!"
+        exit 1
+      }
+
+      Write-Host "DATABRICKS_HOST (final): $($env:DATABRICKS_HOST)"
+      # Write-Host "DATABRICKS_TOKEN length: $($env:DATABRICKS_TOKEN.Length)"
+
+      Write-Host "PWD: $(Get-Location)"
+      Write-Host "Dir Listing"
+      Get-ChildItem -Recurse -Filter databricks.yml  | ForEach-Object { Write-Host $_.FullName }
+
+      # Confirm databricks.yml exists at the absolute target
+      if (-not (Test-Path $databricksYml)) {
+          Write-Error "databricks.yml not found at: $databricksYml"
+          Write-Host "Contents of repo directory ($repoDir):"
+          Get-ChildItem $repoDir -Force
+          exit 1
+      } else {
+          Write-Host "Found databricks.yml at: $databricksYml"
+          Write-Host "First few lines of databricks.yml:"
+          Get-Content $databricksYml -TotalCount 40
+      }
+
+      # Find Databricks CLI exe
+      $installDir = "$(Build.SourcesDirectory)\databricks-cli"
+      $exePath    = Join-Path $installDir 'databricks.exe'
+      if (-not (Test-Path $exePath)) { throw "Databricks CLI binary not found at $exePath" }
+      $env:PATH = "$($installDir);$env:PATH"
+      & $exePath --version   # should show 0.275.0
+
+      # Get workspace URL using Azure CLI, fallback to parameter if it fails
+      Write-Host "databricksHost: ${{ parameters.databricksHost }}"
+      try {
+        $workspaceUrl = az databricks workspace show --resource-group "${{ parameters.resourceGroup }}" --name "${{ parameters.workspaceName }}" --query workspaceUrl -o tsv
+        if (-not $workspaceUrl) { throw "No workspaceUrl returned from az cli" }
+        Write-Host "Workspace URL from az cli: $workspaceUrl"
+      } catch {
+        Write-Warning "Failed to get workspace URL from Azure CLI, using parameter value."
+        $workspaceUrl = "${{ parameters.databricksHost }}"
+      }
+
+      if ($workspaceUrl -notmatch '^https?://') {
+        $DATABRICKS_HOST = "https://$workspaceUrl"
+      } else {
+        $DATABRICKS_HOST = $workspaceUrl
+      }
+      echo "##vso[task.setvariable variable=DATABRICKS_HOST]$DATABRICKS_HOST"
+
+      Write-Host "Workspace URL: $DATABRICKS_HOST"
+      Remove-Item Env:DATABRICKS_AZURE_RESOURCE_ID -ErrorAction SilentlyContinue
+      Remove-Item Env:ARM_CLIENT_ID -ErrorAction SilentlyContinue
+      Remove-Item Env:ARM_CLIENT_SECRET -ErrorAction SilentlyContinue
+      Remove-Item Env:ARM_TENANT_ID -ErrorAction SilentlyContinue
+
+      Write-Host "Deploying bundle from: $repoDir"
+      
+      # Use the repoDir which is already correctly determined in previous steps
+      # This avoids issues with double-nesting paths (e.g. app-datafabric/app-datafabric)
+      $path = Join-Path $repoDir "notebooks"
+      $path = Join-Path $path "code"
+      Write-Host "path: $path"
+      $subFolder = (Get-ChildItem -Path $path -Directory | Select-Object -First 1).Name
+      Write-Host "subfolder: $subFolder"
+      $fullPath = Join-Path $path $subFolder
+      Write-Host "fullPath: $fullPath"
+      $deployPath = "/Workspace/code/$subFolder" -replace '\\','/'
+      Write-Host "deployPath: $deployPath"
+      Write-Host "###########################################################################################################"
+
+
+      # Dynamically create new config for Databricks CLI
+      # Using auth_type = azure-cli to leverage the Authenticated AzureCLI@2 session
+      # This bypasses token management and often resolves permission issues if the SPN is in the workspace
+      @"
+      [DEFAULT]
+      host = $($env:DATABRICKS_HOST)
+      auth_type = azure-cli
+      "@ | Set-Content $cliConfig
+
+      Write-Host "Wrote .databrickscfg file for CLI: $cliConfig (using azure-cli auth)"
+
+      Set-Location $repoDir
+      Write-Host "in dir: $(Get-Location)"
+
+      # Validate bundle using explicit databricks.yml
+      Write-Host "###########################################################################################################"
+      Write-Host "Validating bundle from: $databricksYml"
+      & $exePath bundle validate -t $env:TARGET -p DEFAULT | Out-File validate.json
+      Write-Host "Validation results:"
+      Get-Content validate.json
+      Remove-Item validate.json
+
+      # Summary using explicit databricks.yml
+      Write-Host "###########################################################################################################"
+      Write-Host "Bundle summary: $env:TARGET"
+      & $exePath bundle summary -t $env:TARGET -p DEFAULT
+
+      Write-Host "###########################################################################################################"
+      Write-Host "running bundle deploy $env:TARGET"
+      & $exePath bundle deploy -t $env:TARGET -p DEFAULT
+
+      Write-Host "###########################################################################################################"
+      # Write-Host "running bundle sync $env:TARGET"
+      #& $exePath bundle sync -t $env:TARGET -p DEFAULT
+
+      Write-Host "###########################################################################################################"
+      Write-Host "About to import notebooks to workspace ${{ parameters.databricksHost }} $env:TARGET"
+
+      # Import notebooks, always overwriting existing content
+      & $exePath workspace import-dir --overwrite "$fullPath" "$deployPath"  
+
+      if (Test-Path $cliConfig) {
+        Remove-Item $cliConfig -Force -ErrorAction SilentlyContinue
+        Write-Host "Cleaned up .databrickscfg file for security."
+      }
+
+  env:
+    DATABRICKS_HOST: ${{ parameters.databricksHost }}
+    DATABRICKS_TOKEN: ${{ parameters.databricksToken }}
+    DATABRICKS_BUNDLE_TARGET: ${{ parameters.target }}
+    TARGET: ${{ parameters.target }}
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Save Databricks bundle state'
+  inputs:
+    artifactName: databricks-bundle-state-${{ parameters.target }}
+    targetPath: '${{ parameters.repositoryDir }}/.databricks'

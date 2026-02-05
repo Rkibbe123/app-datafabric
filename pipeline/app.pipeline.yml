@@ -1,0 +1,81 @@
+
+name: $(Build.DefinitionName)_$(Year:yyyy).$(Month).$(DayOfMonth)-$(BuildIdentifier)$(Build.SourceBranchName)-$(Rev:r)
+
+# Do not modify this unless there is a universal change being made to all repos *or* folder triggers are needed due to a mono-repo
+trigger: none
+#trigger:
+  #branches:
+    #include:
+      #- '*'
+
+ 
+#This pipeline YAML file is copied from a template.  It must be modified to fit the needs of the code passing through it
+#This template is a snapshot from a point in time.  Future changes to the base file will not be reflected here and
+#As such, this file will need to be manually updated with future changes if necessary
+parameters:
+  - name: deployment_type
+    displayName: 'Select Deployment Type'
+    type: string
+    default: 'app-datafabric'
+    values:
+      - app-datafabric
+      - app-claimsanalyzer
+      - app-contractanalyzer
+  - name: clean_bundle-root
+    displayName: 'clean_bundle-root[uncheck to lv bundle]'
+    type: boolean
+    default: true
+  - name: runSonar
+    type: boolean
+    default: false
+  - name: runCheckmarx
+    type: boolean
+    default: false
+
+variables:
+  - name: BuildIdentifier
+    value: '' #This variable has a specific purpose.  Most teams should just leave it at its default, empty value
+
+pool:
+  name: 'shared-self-hosted-win22'
+  demands:
+    - Agent.Name -equals 20230720000032-1
+
+resources:
+  repositories:
+    - repository: Common
+      type: git
+      name: common/common-templates
+      ref: feature/rkibbe/dab2 # Branch to point at.  Main will be desirable in most cases.  Be sure to change to main before merging the pipeline repo
+    # Add other repos as necessary
+    - repository: self
+      clean: true
+    - repository: app-datafabric # The name used to reference this repository in the checkout step
+      type: git
+      name: "analytics/app-datafabric"
+      #ref: refs/heads/feature/rkibbe/dab-latest3
+      ref: main
+    - repository: app-claimsanalyzer
+      type: git
+      name: "analytics/app-claimsanalyzer"  
+      #ref: refs/heads/feature/rkibbe/dab-latest3
+      ref: main
+    - repository: app-contractanalyzer
+      type: git
+      name: "analytics/app-contractanalyzer"
+      #ref: ref: refs/heads/feature/rkibbe/dab-latest3
+      ref: main
+
+stages:
+  - template: components/stages/pipelineBase.yml@Common
+    parameters:
+      deploymentTemplate:
+        - template: deployment/databricks-asset-bundle.yml@common
+          parameters:
+            deployment_type: ${{parameters.deployment_type}}
+            clean_bundle-root: ${{ parameters['clean_bundle-root'] }}
+      runSonar: ${{parameters.runSonar}}
+      runCheckmarx: ${{parameters.runCheckmarx}}
+    
+
+

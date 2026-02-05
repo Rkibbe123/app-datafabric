@@ -1,0 +1,27 @@
+resources:
+  pipelines:
+    pipeline_dlt_aros3_aly_100131:
+      name: DLT_DELETE_ME
+      configuration:
+        paramADLSWorkspaceUri: analyticsdev@nprodanalyticsdevdls
+        paramEnvironment: dev
+        paramInternalProductId: "19"
+        paramInternalProductName: dma
+        paramInternalClientId: "100131"
+      libraries:
+        - file:
+            path: /Repos/common/app-analyzercommon/notebooks/code/DLT_CDC/DLT_CDC_Source_Code.py
+      schema: db_100131
+      development: true
+      photon: true
+      catalog: dev_analytics
+      notifications:
+        - email_recipients:
+            - eiesus.tsegaye@nthrive.com
+            - kalam.sardar@nthrive.com
+            - amit.mandrawal@nthrive.com
+          alerts:
+            - on-update-success
+            - on-update-failure
+      serverless: true
+      root_path: /Repos/common/app-analyzercommon/notebooks/code/DLT_CDC/DLT_DELETE_ME

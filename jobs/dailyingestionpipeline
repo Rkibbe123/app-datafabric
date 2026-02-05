@@ -1,0 +1,28 @@
+resources:
+  jobs:
+    DailyIngestionPipeline:
+      name: DailyIngestionPipeline
+      tasks:
+        - task_key: Scheduled_Orchestration
+          notebook_task:
+            notebook_path: /Repos/datafabric/app-datafabric/notebooks/code/datafabric/ingestion/DailyIngestionPipeline
+            base_parameters:
+              p_source_servername: ""
+              p_product_id: ""
+              p_environment_name: ""
+              p_datasource_shortname: ""
+            source: WORKSPACE
+          existing_cluster_id: 1030-085003-7t2jw3i5
+      queue:
+        enabled: true
+      parameters:
+        - name: p_datasource_shortname
+          default: ""
+        - name: p_environment_name
+          default: ""
+        - name: p_product_id
+          default: ""
+        - name: p_source_servername
+          default: ""
+      run_as:
+        user_name: svc_analytics@nthrive.com

@@ -1,0 +1,158 @@
+# DEPLOY TO Test
+- stage: DeployToTest
+  dependsOn: BuildDEVDataBricks
+  condition: succeeded()
+  displayName: "Deploy To Test"
+
+  pool:
+    vmImage: 'windows-latest'
+
+  variables:
+  - group: databricks-dab-pipeline
+
+  jobs:    
+  - job: waitForValidation
+    displayName: Wait for external validation
+    pool: server
+    timeoutInMinutes: 4320 # job times out in 3 days
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 1440 # task times out in 1 day
+      inputs:
+        notifyUsers: |
+          Randy.Kibbe1.ctr@finthrive.com
+          example@example.com
+        instructions: 'Please validate the build configuration and resume'
+
+  - job: Initial_config
+    displayName: 'Databricks_Config' 
+    dependsOn:  waitForValidation
+  
+    steps:
+      # Install Databricks CLI with error handling
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.x'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      - script: |
+          python -m pip install --upgrade pip
+          pip install databricks-cli
+        displayName: 'Install Databricks CLI'
+        failOnStderr: true
+
+      #- template: templates/get-kv-secrets.yml
+       # parameters:
+       #   azureSubscription: $(TestazureServiceConnection)
+       #   KeyVaultName: $(TestKeyVaultName)
+       #   SecretsFilter: "*"
+       #   RunAsPreJob: true
+
+      - template: templates/get-dbx-config.yml
+        parameters:
+          #azureSubscription: $(TestazureServiceConnection)
+          azureSubscription: 'nprod-qae'
+          resourceGroup: $(qae-databricks-rg-name)
+          workspaceName: $(qae-databricks-name)
+      
+      - task: DownloadPipelineArtifact@2
+        displayName: "Download The DBX Artifact"
+        inputs:
+          artifactName: "databricks"
+          targetpath: "$(Build.ArtifactStagingDirectory)/databricks"
+
+      # Deploy Databricks asset bundle to TEST
+      #- template: templates/deploy-dbx-bundle.yml
+      #  parameters:
+      #    azureSubscription: nprod-qae
+      #    databricksHost: "$DATABRICKS_HOST"
+      #    target: test
+
+      # Post-deployment smoke test: Run a Databricks notebook to verify deployment
+      #- template: templates/run-dbx-smoketest.yml
+      #  parameters:
+      #    azureSubscription: nprod-qae
+      #    databricksHost: $(DATABRICKS_HOST)
+      #    smokeTestJobId: $(SMOKE_TEST_JOB_ID)
+
+
+# DEPLOY TO PROD
+- stage: DeployToProd
+  dependsOn: DeployToTest
+  condition: succeeded()
+  displayName: "Deploy To Prod"
+
+  pool:
+    vmImage: 'windows-latest'
+  
+  variables:
+  - group: databricks-dab-pipeline
+
+  jobs:    
+  - job: waitForValidation
+    displayName: Wait for external validation
+    pool: server
+    timeoutInMinutes: 4320 # job times out in 3 days
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 1440 # task times out in 1 day
+      inputs:
+        notifyUsers: |
+          Randy.Kibbe@franciscanalliance.org
+          example@example.com
+        instructions: 'Please validate the build configuration and resume'
+
+  - job: Initial_config
+    displayName: 'Databricks_Config' 
+    dependsOn:  waitForValidation
+  
+    steps:
+
+      # Install Databricks CLI with error handling
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.x'
+        inputs:
+          versionSpec: '3.x'
+          addToPath: true
+
+      - script: |
+          python -m pip install --upgrade pip
+          pip install databricks-cli
+        displayName: 'Install Databricks CLI'
+        failOnStderr: true
+
+      #- template: templates/get-kv-secrets.yml
+      #  parameters:
+          #azureSubscription: 'edlhprodAzureServicePrincipal'
+      #    azureSubscription: 'nprod-prod'
+      #    KeyVaultName: $(ProdKeyVaultName)
+      #    SecretsFilter: "*"
+      #    RunAsPreJob: true
+
+      - template: templates/get-dbx-config.yml
+        parameters:
+          #azureSubscription: $(DevazureServiceConnection)
+          azureSubscription: 'prod'
+          resourceGroup: $(kvscr-apm0004332-edlh-azdo-databricks-rg-name)
+          workspaceName: $(kvscr-apm0004332-edlh-azdo-databricks-name)
+      
+      - task: DownloadPipelineArtifact@2
+        displayName: "Download The DBX Artifact"
+        inputs:
+          artifactName: "databricks"
+          targetpath: "$(Build.ArtifactStagingDirectory)/databricks"
+
+      # Deploy Databricks asset bundle to PROD
+      #- template: templates/deploy-dbx-bundle.yml
+      #  parameters:
+      #    azureSubscription: 'prod'
+      #    databricksHost: "$DATABRICKS_HOST"
+      #    target: prod
+
+      # Post-deployment smoke test: Run a Databricks notebook to verify deployment
+      #- template: templates/run-dbx-smoketest.yml
+      #  parameters:
+      #    azureSubscription: 'prod'
+      #    databricksHost: $(DATABRICKS_HOST)
+      #    smokeTestJobId: $(SMOKE_TEST_JOB_ID)

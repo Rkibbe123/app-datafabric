@@ -1,0 +1,204 @@
+bundle:
+  name: example-bundle
+
+include:
+  # Include all YAML files in the resources directory
+  - "resources/*.yml"
+  
+workspace:
+  root_path: "~/.bundle/${bundle.target}/${bundle.name}"
+
+artifacts:
+  default:
+    type: whl
+    build: "pip wheel -w dist/ ."
+    path: "./dist/*.whl"
+
+resources:
+  # Include all notebooks using wildcard pattern
+  notebooks:
+    # This will include ALL notebooks recursively from the notebooks directory
+    all_notebooks:
+      source: notebooks/**
+      path: /Workspace/notebooks/
+
+  # Alternative: More specific notebook inclusions
+  experimental_notebooks:
+    source: notebooks/experimental/**
+    path: /Workspace/experimental/
+    
+  production_notebooks:
+    source: notebooks/production/**
+    path: /Workspace/production/
+
+  # Jobs that reference notebooks using wildcards
+  jobs:
+    data_processing_job:
+      name: "Data Processing Pipeline - ${bundle.target}"
+      tasks:
+        - task_key: etl_task
+          notebook_task:
+            notebook_path: /Workspace/notebooks/etl/data_processing.py
+            source: WORKSPACE
+            base_parameters:
+              environment: "${bundle.target}"
+              catalog: "main_${bundle.target}"
+          existing_cluster_id: ${var.cluster_id}
+          
+        - task_key: analysis_task
+          depends_on:
+            - task_key: etl_task
+          notebook_task:
+            notebook_path: /Workspace/notebooks/analysis/daily_report.py
+            source: WORKSPACE
+            base_parameters:
+              environment: "${bundle.target}"
+          existing_cluster_id: ${var.cluster_id}
+      
+      # Job-level settings
+      timeout_seconds: 3600
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure: ["admin@company.com"]
+      
+      # Schedule (optional)
+      schedule:
+        quartz_cron_expression: "0 0 8 * * ?" # Daily at 8 AM
+        timezone_id: "America/New_York"
+        
+  # Pipelines (Delta Live Tables)
+  pipelines:
+    main_pipeline:
+      name: "Main Data Pipeline - ${bundle.target}"
+      libraries:
+        # Include all pipeline notebooks
+        - notebook:
+            path: ./notebooks/pipelines/bronze_layer.py
+        - notebook:
+            path: ./notebooks/pipelines/silver_layer.py
+        - notebook:
+            path: ./notebooks/pipelines/gold_layer.py
+      configuration:
+        bundle.sourcePath: "${workspace.file_path}/notebooks/pipelines"
+      target: "${bundle.target}_catalog"
+      
+  # Model serving endpoints
+  model_serving_endpoints:
+    ml_model_endpoint:
+      name: "ml-model-${bundle.target}"
+      config:
+        served_models:
+          - name: "current_model"
+            model_name: "ml_model_${bundle.target}"
+            model_version: "1"
+            workload_size: "Small"
+            scale_to_zero_enabled: true
+
+# Variables that can be overridden per target
+variables:
+  catalog_name:
+    description: "Name of the catalog to use"
+    default: "main"
+    
+  schema_name:
+    description: "Name of the schema to use"
+    default: "default"
+    
+  cluster_id:
+    description: "Databricks cluster ID for job execution"
+    default: ""
+    
+  warehouse_id:
+    description: "SQL warehouse ID for SQL tasks"
+    default: ""
+
+# Target-specific configurations
+targets:
+  # Development environment
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://your-dev-workspace.cloud.databricks.com
+      root_path: /Workspace/bundles/${bundle.name}/dev
+    variables:
+      catalog_name: "dev_catalog"
+      schema_name: "bronze"
+      cluster_id: "your-dev-cluster-id"
+      warehouse_id: "your-dev-warehouse-id"
+    # Override permissions for dev
+    permissions:
+      - level: CAN_MANAGE
+        group_name: "developers"
+      - level: CAN_VIEW
+        group_name: "analysts"
+        
+  # Test/QA environment  
+  test:
+    mode: production
+    workspace:
+      host: https://your-test-workspace.cloud.databricks.com
+      root_path: /Workspace/bundles/${bundle.name}/test
+    variables:
+      catalog_name: "test_catalog"
+      schema_name: "bronze"
+      cluster_id: "your-test-cluster-id"
+      warehouse_id: "your-test-warehouse-id"
+    # More restrictive permissions for test
+    permissions:
+      - level: CAN_MANAGE
+        group_name: "qa_team"
+      - level: CAN_VIEW
+        group_name: "developers"
+        
+  # Production environment
+  prod:
+    mode: production
+    workspace:
+      host: https://your-prod-workspace.cloud.databricks.com  
+      root_path: /Workspace/bundles/${bundle.name}/prod
+    variables:
+      catalog_name: "prod_catalog"
+      schema_name: "bronze"
+      cluster_id: "your-prod-cluster-id"
+      warehouse_id: "your-prod-warehouse-id"
+    # Strict permissions for production
+    permissions:
+      - level: CAN_MANAGE
+        group_name: "data_engineers"
+      - level: CAN_VIEW
+        group_name: "business_users"
+        
+    # Production-specific job overrides
+    resources:
+      jobs:
+        data_processing_job:
+          # Override schedule for production
+          schedule:
+            quartz_cron_expression: "0 0 6 * * ?" # Daily at 6 AM in prod
+          # More email notifications
+          email_notifications:
+            on_start: ["ops@company.com"]
+            on_success: ["business@company.com"] 
+            on_failure: ["ops@company.com", "admin@company.com"]
+          # Larger timeout for production
+          timeout_seconds: 7200
+
+# Sync settings for notebooks
+sync:
+  # Exclude certain files/directories from sync
+  exclude:
+    - ".git/*"
+    - "*.tmp"
+    - "__pycache__/*"
+    - ".pytest_cache/*"
+    - "dist/*"
+    - "*.egg-info/*"
+    
+  # Include patterns (optional, defaults to all files)
+  include:
+    - "notebooks/**"
+    - "src/**"
+    - "tests/**"
+    - "*.yml"
+    - "*.yaml"

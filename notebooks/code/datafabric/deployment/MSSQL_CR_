@@ -1,0 +1,1165 @@
+ALTER TABLE cfg.ProcessStatusFacilityDetail add DataSourceId smallint
+
+ALTER TABLE cfg.ProcessStatusFacility add DataSourceId smallint
+
+INSERT INTO cfg.AttributeSystem (
+	Environment
+	,AttributeName
+	,AttributeValue
+	)
+VALUES (
+	'Prod'
+	,'ProductClientFacilitySchema'
+	,'["ClientCode","ClientName","FacilityCode","FacilityName","SourceFacilityId","SourceFacilityCode","SourceServerName1","SourceDatabaseName1","SourceServerName2","SourceDatabaseName2","SourceServerName3","SourceDatabaseName3","SourceServerName4","SourceDatabaseName4","ProjectId","InstanceId","DataSourceId","ExtractFileNamePattern"]'
+	)
+	,(
+	'Prod'
+	,'ProductClientSchema'
+	,'["ClientCode","ClientName","SourceClientId","SourceServerName1","SourceDatabaseName1","SourceServerName2","SourceDatabaseName2","SourceServerName3","SourceDatabaseName3","SourceServerName4","SourceDatabaseName4","SourceServerName5","SourceDatabaseName5","ProcessAllFacilitiesTogether","WaitForAllFacilities","MinWatermarkValue","DatafactoryName","DatabricksClusterId","DeploymentGroupNumber"]'
+	)
+	,(
+	'Prod'
+	,'ClientSchema'
+	,'["ClientCode","ClientName","SalesforceClientId","PAS","PASCode","Zone","State","ZIP","SourceClientId","DWHServerName","DwhDatabaseName","DwhDatabaseUserName"]'
+	)
+	,(
+	'Prod'
+	,'FacilitySchema'
+	,'["ClientCode","ClientName","FacilityCode","FacilityName","FacilityType","SalesforceFacilityId","PAS","PASCode","PASCategory","PASSubCategory","Zone","State","ZIP","FacilityGroupName"]'
+	)
+	,(
+	'Prod'
+	,'ProductInstanceSchema'
+	,'["InternalProductId","DataSourceId","SourceServerName1","SourceDatabaseName1","SourceServerName2","SourceDatabaseName2","SourceServerName3","SourceDatabaseName3","SourceServerName4","SourceDatabaseName4","SourceServerName5","SourceDatabaseName5","MinWatermarkValue","DatafactoryName","DatabricksClusterName"]'
+	)
+	,(
+	'Prod'
+	,'AdlsImplementationConfigArchivePath'
+	,'/ImplementationScriptConfig/Archive'
+	)
+	,(
+	'Prod'
+	,'AdlsImplementationConfigErrorPath'
+	,'/ImplementationScriptConfig/SchemaMismatch'
+	)
+	,(
+	'Prod'
+	,'AdlsAnalyticsFullpathUri'
+	,'abfss://analyticsprod@prodalyp1adls01sa.dfs.core.windows.net/'
+	)
+	,(
+	'Prod'
+	,'AdlsAnalyticsFullpathUriArchive'
+	,'abfss://analyticsprodarchive@prodalyp1adls01sa.dfs.core.windows.net/'
+	)
+	,(
+	'Prod'
+	,'AdlsAnalyticsSecretScope'
+	,'AnalyticsPrdKv01Scope'
+	)
+	,(
+	'Prod'
+	,'AnalyticsUnityCatalog'
+
+
+	SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER TABLE cfg.productclient ADD DatabricksClusterName VARCHAR(25) NULL;
+GO
+
+
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- drop view dbo.vw_ServerProcessList;
+CREATE
+	OR
+
+ALTER VIEW [CFG].[vw_ServerProcessList]
+AS
+WITH historicalServers
+AS (
+	SELECT SourceInstanceServerName
+		,LEFT(StepName, CHARINDEX('.', StepName) - 1) AS SourceDatabaseName1
+		,Max(cast(IsHistorical AS INT)) AS IsHistorical
+	FROM cfg.ProcessStatusFacilityDetail
+	WHERE InternalProductId = 27
+	GROUP BY SourceInstanceServerName
+		,LEFT(StepName, CHARINDEX('.', StepName) - 1)
+	)
+	,ServerProcessList
+AS (
+	SELECT pc.InternalProductId
+		,pc.InternalClientId
+		,0 AS InternalFacilityId
+		,pc.DataSourceId
+		,pc.SourceServerName1
+		,pc.SourceDatabaseName1
+		,pc.SourceServerName2
+		,pc.CDCgatewayPipelineID
+		,pc.CDCingestionPipelineID
+		,pc.CDC_ConfigJSON
+		,'ProductClient' AS RecordSource
+	FROM cfg.ProductClient pc
+	WHERE pc.internalproductid = 27
+		AND pc.Active = 1
+		AND datasourceid IN (
+			46
+			,47
+			)
+	
+	UNION
+	
+	SELECT pcf.InternalProductId
+		,pcf.InternalClientId
+		,InternalFacilityId
+		,pcf.DataSourceId
+		,pcf.SourceServerName1
+		,pcf.SourceDatabaseName1
+		,pcf.SourceServerName2
+		,pcf.CDCgatewayPipelineID
+		,pcf.CDCingestionPipelineID
+		,pcf.CDC_ConfigJSON
+		,'ProductClientFacility'
+	FROM cfg.ProductClientFacility pcf
+	WHERE pcf.internalproductid = 27
+		AND pcf.Active = 1
+		AND datasourceid IN (
+			46
+			,47
+			)
+		AND sourceDatabasename1 IS NOT NULL
+	
+	UNION
+	
+	SELECT pin.InternalProductId
+		,0
+		,0
+		,pin.DataSourceId
+		,pin.SourceServerName1
+		,pin.SourceDatabaseName1
+		,pin.SourceServerName2
+		,pin.CDCgatewayPipelineID
+		,pin.CDCingestionPipelineID
+		,pin.CDC_ConfigJSON
+		,'ProductInstance'
+	FROM cfg.ProductInstance pin
+	WHERE internalproductid = 27
+		AND Active = 1
+		AND datasourceid IN (
+			46
+			,47
+			)
+	)
+SELECT spl.*
+	,ds.DataSourceShortName
+	,IsHistorical
+FROM ServerProcessList spl
+LEFT JOIN historicalServers hs ON spl.SourceServerName1 = hs.SourceInstanceServerName
+	AND spl.SourceDatabaseName1 = hs.SourceDatabaseName1
+INNER JOIN cfg.DataSource ds ON spl.DataSourceId = ds.DataSourceId
+GO
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE
+	OR
+
+ALTER VIEW [CFG].[vw_TableProcessList]
+AS
+WITH serverlist
+AS (
+	SELECT spl.InternalproductId
+		,spl.InternalClientID
+		,pcf.InternalClientId AS FacilityInternalClientId
+		,spl.InternalFacilityId
+		,pcf.InternalFacilityId AS FacilityInternalFacilityId
+		,spl.DataSourceId
+		,spl.SourceServerName1
+		,spl.SourceServername2
+		,spl.SourceDatabaseName1
+		,spl.CDCgatewayPipelineID
+		,spl.CDCingestionPipelineID
+		,spl.CDC_ConfigJSON
+		,RecordSource
+		,DataSourceShortName
+		,IsHistorical
+		,SourceFacilityId
+	FROM cfg.vw_ServerProcessList spl
+	INNER JOIN cfg.ProductClientFacility pcf ON spl.SourceServerName1 = pcf.SourceServerName1
+		AND spl.DataSourceId = pcf.DataSourceId
+	WHERE pcf.Active = 1
+		AND RecordSource <> 'ProductClient'
+	
+	UNION
+	
+	SELECT spl.InternalproductId
+		,spl.InternalClientID
+		,CASE 
+			WHEN spl.InternalClientId = 0
+				THEN 0
+			ELSE pcf.InternalClientId
+			END AS FacilityInternalClientId
+		,spl.InternalFacilityId
+		,0 AS FacilityInternalFacilityId
+		,spl.DataSourceId
+		,spl.SourceServerName1
+		,spl.SourceServername2
+		,spl.SourceDatabaseName1
+		,spl.CDCgatewayPipelineID
+		,spl.CDCingestionPipelineID
+		,spl.CDC_ConfigJSON
+		,RecordSource
+		,DataSourceShortName
+		,IsHistorical
+		,0 AS SourceFacilityId
+	FROM cfg.vw_ServerProcessList spl
+	INNER JOIN cfg.ProductClientFacility pcf ON spl.SourceServerName1 = pcf.SourceServerName1
+		AND spl.DataSourceId = pcf.DataSourceId
+	WHERE pcf.Active = 1
+		AND spl.RecordSource = 'ProductClient'
+	)
+	,historicalServers
+AS (
+	SELECT SourceInstanceServerName
+		,InternalProductId
+		,InternalClientIds
+		,InternalFacilityId
+		,LEFT(StepName, CHARINDEX('.', StepName) - 1) AS SourceDatabaseName1
+		,RIGHT(StepName, LEN(StepName) - CHARINDEX('.', StepName)) AS StepName
+		,WatermarkValue
+		,IsHistorical
+	FROM cfg.ProcessStatusFacilityDetail
+	WHERE InternalProductId = 27
+		AND DataSourceId IN (
+			46
+			,47
+			)
+	)
+	,TableList
+AS (
+	SELECT sl.RecordSource
+		,ppc.InternalProductId
+		,sl.InternalClientId
+		,sl.FacilityInternalClientId
+		,sl.InternalFacilityId
+		,sl.FacilityInternalFacilityId
+		,sl.SourceFacilityId
+		,sl.SourceServerName1
+		,sl.SourceDatabaseName1
+		,sl.SourceServerName2
+		,sl.CDC_ConfigJSON
+		,sl.CDCgatewayPipelineID
+		,sl.CDCingestionPipelineID
+		,ppc.StepProcessLevel
+		,ppc.Stepname
+		,ppc.DataSourceId
+		,ppc.IncrementalExtractQuery
+		,ppc.HistoricalExtractQuery
+		,ppc.CDCKeyColumns
+		,ds.DataSourceShortName
+		,ds.DataSourceType
+	FROM cfg.productProcessConfig ppc
+	INNER JOIN cfg.DataSource ds ON ppc.DataSourceId = ds.DataSourceId
+		AND ds.Active = 1
+	INNER JOIN serverlist sl ON sl.DataSourceId = ppc.DataSourceId
+		AND sl.RecordSource = ppc.StepProcessLevel
+		AND sl.InternalClientId <> 0
+	WHERE ppc.InternalProductId = 27
+		AND ppc.Active = 1
+		AND ppc.DataSourceId IN (
+			46
+			,47
+			)
+	
+	UNION
+	
+	SELECT sl.RecordSource
+		,ppc.InternalProductId
+		,sl.InternalClientId
+		,sl.FacilityInternalClientId
+		,sl.InternalFacilityId
+		,sl.FacilityInternalFacilityId
+		,sl.SourceFacilityId
+		,sl.SourceServerName1
+		,sl.SourceDatabaseName1
+		,sl.SourceServerName2
+		,CDC_ConfigJSON
+		,CDCgatewayPipelineID
+		,CDCingestionPipelineID
+		,ppc.StepProcessLevel
+		,ppc.Stepname
+		,ppc.DataSourceId
+		,ppc.IncrementalExtractQuery
+		,ppc.HistoricalExtractQuery
+		,ppc.CDCKeyColumns
+		,ds.DataSourceShortName
+		,ds.DataSourceType
+	FROM cfg.productProcessConfig ppc
+	INNER JOIN cfg.DataSource ds ON ppc.DataSourceId = ds.DataSourceId
+		AND ds.Active = 1
+	INNER JOIN serverlist sl ON sl.DataSourceId = ppc.DataSourceId
+		AND sl.SourceDatabaseName1 = ppc.StepProcessLevel
+		AND sl.InternalClientId = 0
+	WHERE ppc.InternalProductId = 27
+		AND ppc.Active = 1
+		AND ppc.DataSourceId IN (
+			46
+			,47
+			)
+		AND ppc.InternalClientId = 0
+	
+	UNION --table list for productInstance
+	
+	SELECT 'ProductInstance' AS RecordSource
+		,ppc.InternalProductId
+		,sl.InternalClientId
+		,sl.FacilityInternalClientId
+		,sl.InternalFacilityId
+		,sl.FacilityInternalFacilityId
+		,sl.SourceFacilityId
+		,pin.SourceServerName1
+		,pin.SourceDatabaseName1
+		,pin.SourceServerName2
+		,pin.CDC_ConfigJSON
+		,pin.CDCgatewayPipelineID
+		,pin.CDCingestionPipelineID
+		,ppc.StepProcessLevel
+		,ppc.Stepname
+		,ppc.DataSourceId
+		,ppc.IncrementalExtractQuery
+		,ppc.HistoricalExtractQuery
+		,ppc.CDCKeyColumns
+		,ds.DataSourceShortName
+		,ds.DataSourceType
+	FROM cfg.productProcessConfig ppc
+	INNER JOIN cfg.DataSource ds ON ppc.DataSourceId = ds.DataSourceId
+		AND ds.Active = 1
+	INNER JOIN cfg.ProductInstance pin ON ppc.DataSourceId = pin.DataSourceID
+		AND ppc.StepProcessLevel = pin.SourceDatabaseName1
+		AND pin.Active = 1
+	INNER JOIN serverlist sl ON sl.DataSourceId = ppc.DataSourceId
+		AND sl.SourceServerName1 = pin.SourceServerName1
+	WHERE ppc.InternalProductId = 27
+		AND ppc.Active = 1
+		AND ppc.DataSourceId IN (
+			46
+			,47
+			)
+	)
+SELECT tl.*
+	,hs.IsHistorical
+	,hs.WatermarkValue
+FROM TableList tl
+LEFT JOIN historicalServers hs ON tl.InternalProductId = hs.InternalProductId
+	AND tl.SourceServerName1 = hs.SourceInstanceServerName
+	AND tl.SourceDatabaseName1 = hs.SourceDatabaseName1
+	AND tl.StepName = hs.StepName
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+Create or ALTER     PROCEDURE [CFG].[UpdateProcessStatusFacilityDetail] 
+    @InternalProductId     SMALLINT, 
+    @InternalClientId      INT,
+    @InternalFacilityId    INT,
+    @StepName              VARCHAR(100),
+    @Status                CHAR(1),
+    @NewWatermarkValue     DATETIME = NULL,
+    @DataSourceId          INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    UPDATE cfg.ProcessStatusFacilityDetail
+    SET [Status] = @Status,
+        [DateTimeLastModified] = GETDATE(),
+        ModifiedByUser         = ORIGINAL_LOGIN()
+    WHERE InternalProductId   = @InternalProductId
+      AND InternalClientIds   = @InternalClientId
+      AND InternalFacilityId  = @InternalFacilityId
+      AND StepName            = @StepName
+      AND DataSourceId        = @DataSourceId
+      AND StepType            = 'Extract';
+END
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+Create or ALTER     PROCEDURE [CFG].[UpdateProcessStatusFacility]
+    @InternalProductId     SMALLINT,
+    @InternalClientId      INT,
+    @InternalFacilityId    INT,
+    @StepName              VARCHAR(100),
+    @Status                CHAR(1),
+    @NewWatermarkValue     DATETIME = NULL,
+    @DataSourceId          INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    -- Case 1: Status = 'C' (Completed) -> Update status AND watermark
+    IF @Status = 'C'
+    BEGIN
+        UPDATE cfg.ProcessStatusFacility
+        SET [Status]              = @Status,
+            WatermarkValue        = COALESCE(@NewWatermarkValue, WatermarkValue),
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+ 
+        UPDATE cfg.ProcessStatusFacilityDetail
+        SET [Status]              = @Status,
+            WatermarkValue        = COALESCE(@NewWatermarkValue, WatermarkValue),
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND StepName            LIKE '%' + @StepName + '%'
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+    END
+ 
+    -- Case 2: Status = 'P' (Processing) -> Update status only (no watermark change)
+    ELSE IF @Status = 'P'
+    BEGIN
+        UPDATE cfg.ProcessStatusFacility
+        SET [Status]              = @Status,
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+ 
+        UPDATE cfg.ProcessStatusFacilityDetail
+        SET [Status]              = @Status,
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND StepName            LIKE '%' + @StepName + '%'
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+    END
+ 
+    -- Case 3: Any other status -> Only update ProcessStatusFacility
+    ELSE
+    BEGIN
+        UPDATE cfg.ProcessStatusFacility
+        SET [Status]              = @Status,
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+    END
+END
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+Create or ALTER   PROCEDURE [CFG].[InsertOrUpdateClient]
+    @IsClientExistsInDb    BIT,
+    @InternalClientId      INT,
+    @SalesforceClientId    INT            = NULL,
+    @ClientCode            NVARCHAR(100),
+    @ClientName            NVARCHAR(200),
+    @PAS                   NVARCHAR(50)   = NULL,
+    @PASCode               NVARCHAR(50)   = NULL,
+    @Zone                  NVARCHAR(50)   = NULL,
+    @State                 NVARCHAR(50)   = NULL,
+    @Zip                   NVARCHAR(20)   = NULL,
+    @DwhServerName         NVARCHAR(128)  = NULL,
+    @DwhDatabaseName       NVARCHAR(128)  = NULL,
+    @DwhDataloadUserName   NVARCHAR(128)  = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    IF (@IsClientExistsInDb = 0)
+    BEGIN
+        INSERT INTO CFG.Client
+        (
+            DateTimeCreated, CreatedByUser,
+            DateTimeLastModified, ModifiedByUser,
+            InternalClientId, SalesforceClientId,
+            ClientCode, ClientName, Active,
+            PAS, PASCode, Zone, State, Zip,
+            DwhServerName, DwhDatabaseName, DwhDataloadUserName
+        )
+        VALUES
+        (
+            GETDATE(), ORIGINAL_LOGIN(),
+            GETDATE(), ORIGINAL_LOGIN(),
+            @InternalClientId, @SalesforceClientId,
+            @ClientCode, @ClientName, 1,
+            @PAS, @PASCode, @Zone, @State, @Zip,
+            @DwhServerName, @DwhDatabaseName, @DwhDataloadUserName
+        );
+    END
+    ELSE
+    BEGIN
+        UPDATE cfg.Client
+        SET DateTimeLastModified = GETDATE(),
+            ModifiedByUser       = ORIGINAL_LOGIN(),
+            DwhServerName        = @DwhServerName,
+            DwhDatabaseName      = @DwhDatabaseName,
+            DwhDataloadUserName  = @DwhDataloadUserName
+        WHERE InternalClientId   = @InternalClientId;
+    END
+ 
+    -- Optional: return the ID used (handy for callers)
+    SELECT @InternalClientId AS InternalClientId;
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+Create or ALTER   PROCEDURE [CFG].[InsertOrUpdateFacility]
+    @IsFacilityExistsInDb  BIT,
+    @InternalClientId      INT,
+    @InternalFacilityId    INT,
+    @SalesforceFacilityId  INT             = NULL,
+    @FacilityCode          NVARCHAR(100),
+    @FacilityName          NVARCHAR(200),
+    @FacilityType          NVARCHAR(100)   = NULL,
+    @PAS                   NVARCHAR(50)    = NULL,
+    @PASCode               NVARCHAR(50)    = NULL,
+    @PASCategory           NVARCHAR(100)   = NULL,
+    @PASSubCategory        NVARCHAR(100)   = NULL,
+    @Zone                  NVARCHAR(50)    = NULL,  -- was $zcone in PS
+    @State                 NVARCHAR(50)    = NULL,  -- was $ztate in PS
+    @Zip                   NVARCHAR(20)    = NULL,
+    @FacilityGroupName     NVARCHAR(200)   = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    IF (@IsFacilityExistsInDb = 0)
+    BEGIN
+        INSERT INTO [CFG].[Facility]
+        (
+            [DateTimeCreated], [CreatedByUser],
+            [DateTimeLastModified], [ModifiedByUser],
+            [InternalClientId], [InternalFacilityId],
+            [SalesforceFacilityId],
+            [FacilityCode], [FacilityName], [Active],
+            [FacilityType], [PAS], [PASCode], [PASCategory], [PASSubCategory],
+            [Zone], [State], [Zip], [FacilityGroupName]
+        )
+        VALUES
+        (
+            GETDATE(), ORIGINAL_LOGIN(),
+            GETDATE(), ORIGINAL_LOGIN(),
+            @InternalClientId, @InternalFacilityId,
+            @SalesforceFacilityId,
+            @FacilityCode, @FacilityName, 1,
+            @FacilityType, @PAS, @PASCode, @PASCategory, @PASSubCategory,
+            @Zone, @State, @Zip, @FacilityGroupName
+        );
+    END
+    ELSE
+    BEGIN
+        UPDATE f
+        SET f.[DateTimeLastModified] = GETDATE(),
+            f.[ModifiedByUser]       = ORIGINAL_LOGIN(),
+            f.[FacilityType]         = @FacilityType,
+            f.[FacilityGroupName]    = @FacilityGroupName
+        FROM [CFG].[Facility] AS f
+        WHERE f.[Active] = 1
+          AND f.[InternalClientId]   = @InternalClientId
+          AND f.[InternalFacilityId] = @InternalFacilityId;
+    END
+ 
+    -- Convenience result
+    SELECT @InternalClientId   AS InternalClientId,
+           @InternalFacilityId AS InternalFacilityId;
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+Create or ALTER   PROCEDURE [CFG].[InsertOrUpdateProductClient]
+    @IsProductClientExistsInDb    BIT,
+    @InternalProductId            INT,
+    @InternalClientId             INT,
+    @SourceClientId               INT              = NULL,
+    @SourceServerName1            NVARCHAR(128)    = NULL,
+    @SourceDatabaseName1          NVARCHAR(128)    = NULL,
+    @SourceServerName2            NVARCHAR(128)    = NULL,
+    @SourceDatabaseName2          NVARCHAR(128)    = NULL,
+    @SourceServerName3            NVARCHAR(128)    = NULL,
+    @SourceDatabaseName3          NVARCHAR(128)    = NULL,
+    @SourceServerName4            NVARCHAR(128)    = NULL,
+    @SourceDatabaseName4          NVARCHAR(128)    = NULL,
+    @SourceServerName5            NVARCHAR(128)    = NULL,
+    @SourceDatabaseName5          NVARCHAR(128)    = NULL,
+    @ProcessAllFacilitiesTogether BIT     = NULL, 
+    @WaitForAllFacilities         BIT     = NULL,  
+    @MinWatermarkValue            DATETIME2(3)    = NULL,  
+    @DatafactoryName              NVARCHAR(50)    = NULL,
+    @DatabricksClusterName        NVARCHAR(25)    = NULL,
+    @DatabricksClusterId     NVARCHAR(50)    = NULL,
+    @DeploymentGroupNumber       INT    = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    IF (@IsProductClientExistsInDb = 0)
+    BEGIN
+        INSERT INTO CFG.ProductClient
+        (
+            DateTimeCreated, CreatedByUser,
+            DateTimeLastModified, ModifiedByUser,
+            InternalProductId, InternalClientId, Active,
+            SourceClientId,
+            SourceServerName1, SourceDatabaseName1,
+            SourceServerName2, SourceDatabaseName2,
+            SourceServerName3, SourceDatabaseName3,
+            SourceServerName4, SourceDatabaseName4,
+            SourceServerName5, SourceDatabaseName5,
+            ProcessAllFacilitiesTogether, WaitForAllFacilities, MinWatermarkValue,
+            DatafactoryName, DatabricksClusterName,
+            DatabricksClusterId, DeploymentGroupNumber
+        )
+        VALUES
+        (
+            GETDATE(), ORIGINAL_LOGIN(),
+            GETDATE(), ORIGINAL_LOGIN(),
+            @InternalProductId, @InternalClientId, 1,
+            @SourceClientId,
+            @SourceServerName1, @SourceDatabaseName1,
+            @SourceServerName2, @SourceDatabaseName2,
+            @SourceServerName3, @SourceDatabaseName3,
+            @SourceServerName4, @SourceDatabaseName4,
+            @SourceServerName5, @SourceDatabaseName5,
+            @ProcessAllFacilitiesTogether, @WaitForAllFacilities, @MinWatermarkValue,
+            @DatafactoryName, @DatabricksClusterName,
+            @DatabricksClusterId, @DeploymentGroupNumber
+        );
+    END
+    ELSE
+    BEGIN
+        UPDATE pc
+        SET pc.DateTimeLastModified       = GETDATE(),
+            pc.ModifiedByUser             = ORIGINAL_LOGIN(),
+            pc.SourceClientId             = @SourceClientId,
+            pc.SourceServerName1          = @SourceServerName1,
+            pc.SourceDatabaseName1        = @SourceDatabaseName1,
+            pc.SourceServerName2          = @SourceServerName2,
+            pc.SourceDatabaseName2        = @SourceDatabaseName2,
+            pc.SourceServerName3          = @SourceServerName3,
+            pc.SourceDatabaseName3        = @SourceDatabaseName3,
+            pc.SourceServerName4          = @SourceServerName4,
+            pc.SourceDatabaseName4        = @SourceDatabaseName4,
+            pc.SourceServerName5          = @SourceServerName5,
+            pc.SourceDatabaseName5        = @SourceDatabaseName5,
+            pc.ProcessAllFacilitiesTogether = @ProcessAllFacilitiesTogether,
+            pc.WaitForAllFacilities         = @WaitForAllFacilities,
+            pc.MinWatermarkValue            = @MinWatermarkValue
+        FROM cfg.ProductClient AS pc
+        WHERE pc.InternalProductId = @InternalProductId
+          AND pc.InternalClientId  = @InternalClientId;
+    END
+ 
+    -- Convenience return (composite key)
+    SELECT @InternalProductId AS InternalProductId,
+           @InternalClientId  AS InternalClientId;
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+Create or ALTER   PROCEDURE [CFG].[InsertOrUpdateProductClientFacility]
+    @IsProductClientFacilityExistsInDb BIT,
+    @InternalProductId            SMALLINT,
+    @InternalClientId             INT,
+    @InternalFacilityId           INT,
+    @SourceFacilityId             VARCHAR(50)  = NULL,
+    @SourceFacilityCode           VARCHAR(20)  = NULL,
+    @SourceServerName1            VARCHAR(100)  = NULL,
+    @SourceDatabaseName1          VARCHAR(100)  = NULL,
+    @SourceServerName2            VARCHAR(100)  = NULL,
+    @SourceDatabaseName2          VARCHAR(100)  = NULL,
+    @SourceServerName3            VARCHAR(100)  = NULL,
+    @SourceDatabaseName3          VARCHAR(100)  = NULL,
+    @SourceServerName4            VARCHAR(100)  = NULL,
+    @SourceDatabaseName4          VARCHAR(100)  = NULL,
+    @ProjectId                    VARCHAR(100)  = NULL,
+    @InstanceId                   INT  = NULL,
+    @DataSourceId                 SMALLINT  = NULL,
+    @ExtractFileNamePattern       VARCHAR(100)  = NULL,
+    @ProductStartDate             DATETIME2(3)  = NULL,
+    @ProductEndDate               DATETIME2(3)  = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    IF (@IsProductClientFacilityExistsInDb = 0)
+    BEGIN
+        INSERT INTO [CFG].[ProductClientFacility]
+        (
+            [DateTimeCreated], [CreatedByUser],
+            [DateTimeLastModified], [ModifiedByUser],
+            [InternalProductId], [InternalClientId], [InternalFacilityId], [Active],
+            [SourceFacilityId], [SourceFacilityCode],
+            [SourceServerName1], [SourceDatabaseName1],
+            [SourceServerName2], [SourceDatabaseName2],
+            [SourceServerName3], [SourceDatabaseName3],
+            [SourceServerName4], [SourceDatabaseName4],
+            [ProjectId], [InstanceId], [DataSourceId], [ExtractFileNamePattern]
+        )
+        VALUES
+        (
+            GETDATE(), ORIGINAL_LOGIN(),
+            GETDATE(), ORIGINAL_LOGIN(),
+            @InternalProductId, @InternalClientId, @InternalFacilityId, 1,
+            @SourceFacilityId, @SourceFacilityCode,
+            @SourceServerName1, @SourceDatabaseName1,
+            @SourceServerName2, @SourceDatabaseName2,
+            @SourceServerName3, @SourceDatabaseName3,
+            @SourceServerName4, @SourceDatabaseName4,
+            @ProjectId, @InstanceId, @DataSourceId, @ExtractFileNamePattern
+        );
+    END
+    ELSE
+    BEGIN
+        UPDATE pcf
+        SET pcf.[DateTimeLastModified]   = GETDATE(),
+            pcf.[ModifiedByUser]         = ORIGINAL_LOGIN(),
+            pcf.[SourceFacilityId]       = @SourceFacilityId,
+            pcf.[SourceFacilityCode]     = @SourceFacilityCode,
+            pcf.[SourceServerName1]      = @SourceServerName1,
+            pcf.[SourceDatabaseName1]    = @SourceDatabaseName1,
+            pcf.[SourceServerName2]      = @SourceServerName2,
+            pcf.[SourceDatabaseName2]    = @SourceDatabaseName2,
+            pcf.[SourceServerName3]      = @SourceServerName3,
+            pcf.[SourceDatabaseName3]    = @SourceDatabaseName3,
+            pcf.[SourceServerName4]      = @SourceServerName4,
+            pcf.[SourceDatabaseName4]    = @SourceDatabaseName4,
+            pcf.[ProductStartDate]       = COALESCE(NULLIF(LTRIM(RTRIM(@ProductStartDate)), ''), ProductStartDate),
+            pcf.[ProductEndDate]         = COALESCE(NULLIF(LTRIM(RTRIM(@ProductEndDate)), ''), ProductEndDate),
+            pcf.[ProjectId]              = @ProjectId,
+            pcf.[InstanceId]             = @InstanceId,
+            pcf.[DataSourceId]           = @DataSourceId,
+            pcf.[ExtractFileNamePattern] = @ExtractFileNamePattern
+        FROM [CFG].[ProductClientFacility] pcf
+        WHERE pcf.[InternalProductId] = @InternalProductId
+          AND pcf.[InternalClientId]  = @InternalClientId
+          AND pcf.[InternalFacilityId]= @InternalFacilityId;
+    END
+ 
+ 
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+Create or ALTER   PROCEDURE [CFG].[InsertOrUpdateProductInstance]
+    @IsProductInstanceExists BIT,            
+    @InternalProductId       INT,
+    @DataSourceId       INT,
+    @SourceServerName1       VARCHAR(100) = NULL,
+    @SourceDatabaseName1     VARCHAR(100) = NULL,
+    @SourceServerName2       VARCHAR(100) = NULL,
+    @SourceDatabaseName2     VARCHAR(100) = NULL,
+    @SourceServerName3       VARCHAR(100) = NULL,
+    @SourceDatabaseName3     VARCHAR(100) = NULL,
+    @SourceServerName4       VARCHAR(100) = NULL,
+    @SourceDatabaseName4     VARCHAR(100) = NULL,
+    @SourceServerName5       VARCHAR(100) = NULL,
+    @SourceDatabaseName5     VARCHAR(100) = NULL,
+    @MinWatermarkValue       DATETIME2(3) = NULL,
+    @DatafactoryName         VARCHAR(50) = NULL,
+    @DatabricksClusterName   VARCHAR(25) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    DECLARE @Now  DATETIME2(0) = GETDATE();
+    DECLARE @User SYSNAME      = ORIGINAL_LOGIN();
+ 
+    IF (@IsProductInstanceExists = 0)
+    BEGIN
+        INSERT INTO cfg.ProductInstance
+        (
+            DateTimeCreated, CreatedByUser,
+            DateTimeLastModified, ModifiedByUser,
+            InternalProductId, DataSourceId, Active,
+            SourceServerName1, SourceDatabaseName1,
+            SourceServerName2, SourceDatabaseName2,
+            SourceServerName3, SourceDatabaseName3,
+            SourceServerName4, SourceDatabaseName4,
+            SourceServerName5, SourceDatabaseName5,
+            MinWatermarkValue, DatafactoryName, DatabricksClusterName
+        )
+        VALUES
+        (
+            @Now, @User,
+            @Now, @User,
+            @InternalProductId, @DataSourceId, 1,
+            @SourceServerName1, @SourceDatabaseName1,
+            @SourceServerName2, @SourceDatabaseName2,
+            @SourceServerName3, @SourceDatabaseName3,
+            @SourceServerName4, @SourceDatabaseName4,
+            @SourceServerName5, @SourceDatabaseName5,
+            @MinWatermarkValue, @DatafactoryName, @DatabricksClusterName
+        );
+    END
+    ELSE
+    BEGIN
+        UPDATE pi
+           SET pi.DateTimeLastModified  = @Now,
+               pi.ModifiedByUser        = @User,
+               pi.SourceServerName1     = @SourceServerName1,
+               pi.SourceDatabaseName1   = @SourceDatabaseName1,
+               pi.SourceServerName2     = @SourceServerName2,
+               pi.SourceDatabaseName2   = @SourceDatabaseName2,
+               pi.SourceServerName3     = @SourceServerName3,
+               pi.SourceDatabaseName3   = @SourceDatabaseName3,
+               pi.SourceServerName4     = @SourceServerName4,
+               pi.SourceDatabaseName4   = @SourceDatabaseName4,
+               pi.SourceServerName5     = @SourceServerName5,
+               pi.SourceDatabaseName5   = @SourceDatabaseName5,
+               pi.MinWatermarkValue     = @MinWatermarkValue,
+               pi.DatafactoryName       = @DatafactoryName,
+               pi.DatabricksClusterName = @DatabricksClusterName
+        FROM cfg.ProductInstance AS pi
+        WHERE pi.InternalProductId = @InternalProductId and pi.SourceServerName1 = @SourceServerName1 and pi.SourceDatabaseName1   = @SourceDatabaseName1;
+    END
+ 
+ 
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER   PROCEDURE [CFG].[InsertProcessStatusFacility]
+    @InternalProductId SMALLINT,
+    @InternalClientId INT,
+    @InternalFacilityId INT,
+    @SourceInstanceServerName VARCHAR(100),
+    @IsInstance BIT,
+    @StepType VARCHAR(25),
+    @DataSourceId SMALLINT
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    INSERT INTO [CFG].[ProcessStatusFacility] (
+         [DateTimeLastModified]
+        ,[ModifiedByUser]
+        ,[InternalProductId]
+        ,[InternalClientIds]
+        ,[InternalFacilityId]
+        ,[StepType]
+        ,[Status]
+        ,[WatermarkValue]
+        ,[SourceInstanceServerName]
+        ,[DataSourceId]
+    )
+    VALUES (
+         GETDATE()
+        ,CAST(ORIGINAL_LOGIN() AS VARCHAR(100))
+        ,@InternalProductId
+        ,CASE WHEN @IsInstance = 1 THEN '0' ELSE CAST(@InternalClientId AS VARCHAR(50)) END
+        ,CASE WHEN @IsInstance = 1 THEN 0 ELSE ISNULL(@InternalFacilityId, 0) END
+        ,@StepType
+        ,'P'
+        ,CAST('2000-12-31 11:59:00' AS DATETIME2(3))
+        ,@SourceInstanceServerName
+        ,@DataSourceId
+    );
+ 
+    SELECT CAST(SCOPE_IDENTITY() AS INT) AS ProcessStatusFacilitySk;
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER   PROCEDURE [CFG].[InsertProcessStatusFacilityDetail]
+    @InternalProductId SMALLINT,
+    @InternalClientId INT = NULL,
+    @InternalFacilityId INT = NULL,
+    @SourceInstanceServerName VARCHAR(100)
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    IF @InternalClientId IS NULL AND @InternalFacilityId IS NULL
+    BEGIN
+        ;WITH src AS (
+            SELECT DISTINCT
+                StepNameFull = LEFT(CONCAT(ppc.StepProcessLevel, '.', ppc.StepName), 100)
+            FROM cfg.ProductProcessConfig ppc
+            WHERE ppc.Active = 1
+              AND ppc.InternalProductId = @InternalProductId
+              AND ppc.SourceType = 'Instance'
+        )
+        INSERT INTO CFG.ProcessStatusFacilityDetail
+            (InternalProductId, InternalClientIds, InternalFacilityId, StepType, StepName, Status, WatermarkValue, IsHistorical, SourceInstanceServerName, DataSourceId)
+        SELECT
+            @InternalProductId,
+            '0',
+            0,
+            'Extract',
+            s.StepNameFull,
+            'P',
+            CAST('2000-12-31T11:59:00' AS datetime2(3)),
+            1,
+            @SourceInstanceServerName,
+            46
+        FROM src s
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM CFG.ProcessStatusFacilityDetail d
+            WHERE d.InternalProductId       = @InternalProductId
+              AND d.InternalClientIds       = '0'
+              AND d.InternalFacilityId      = 0
+              AND d.StepType                = 'Extract'
+              AND d.StepName                = s.StepNameFull
+              AND d.SourceInstanceServerName = @SourceInstanceServerName
+        );
+    END
+    ELSE IF @InternalClientId IS NOT NULL AND (ISNULL(@InternalFacilityId, 0) = 0)
+    BEGIN
+        ;WITH db AS (
+            SELECT pc.SourceDatabaseName1
+            FROM cfg.ProductClient pc
+            WHERE pc.Active = 1
+              AND pc.InternalProductId = @InternalProductId
+              AND pc.InternalClientId  = @InternalClientId
+        ),
+        src AS (
+            SELECT DISTINCT
+                StepNameFull = LEFT(CONCAT(db.SourceDatabaseName1, '.', ppc.StepName), 100)
+            FROM cfg.ProductProcessConfig ppc
+            CROSS JOIN db
+            WHERE ppc.Active = 1
+              AND ppc.InternalProductId = @InternalProductId
+              AND ppc.StepProcessLevel = CASE WHEN @InternalClientId = 0 THEN 'CBO_Global' ELSE 'ProductClient' END
+        )
+        INSERT INTO CFG.ProcessStatusFacilityDetail
+            (InternalProductId, InternalClientIds, InternalFacilityId, StepType, StepName, Status, WatermarkValue, IsHistorical, SourceInstanceServerName, DataSourceId)
+        SELECT
+            @InternalProductId,
+            CAST(@InternalClientId AS VARCHAR(50)),
+            0,
+            'Extract',
+            s.StepNameFull,
+            'P',
+            CAST('2000-12-31T11:59:00' AS datetime2(3)),
+            1,
+            @SourceInstanceServerName,
+            47
+        FROM src s
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM CFG.ProcessStatusFacilityDetail d
+            WHERE d.InternalProductId   = @InternalProductId
+              AND d.InternalClientIds   = CAST(@InternalClientId AS VARCHAR(50))
+              AND d.InternalFacilityId  = 0
+              AND d.StepType            = 'Extract'
+              AND d.StepName            = s.StepNameFull
+        );
+    END
+    ELSE
+    BEGIN
+        ;WITH db AS (
+            SELECT pcf.SourceDatabaseName1
+            FROM cfg.ProductClientFacility pcf
+            WHERE pcf.Active = 1
+              AND pcf.InternalProductId = @InternalProductId
+              AND pcf.InternalClientId  = @InternalClientId
+              AND pcf.InternalFacilityId = @InternalFacilityId
+        ),
+        src AS (
+            SELECT DISTINCT
+                StepNameFull = LEFT(CONCAT(db.SourceDatabaseName1, '.', ppc.StepName), 100)
+            FROM cfg.ProductProcessConfig ppc
+            CROSS JOIN db
+            WHERE ppc.Active = 1
+              AND ppc.InternalProductId = @InternalProductId
+              AND ppc.StepProcessLevel = 'ProductClientFacility'
+        )
+        INSERT INTO CFG.ProcessStatusFacilityDetail
+            (InternalProductId, InternalClientIds, InternalFacilityId, StepType, StepName, Status, WatermarkValue, IsHistorical, SourceInstanceServerName, DataSourceId)
+        SELECT
+            @InternalProductId,
+            CAST(@InternalClientId AS VARCHAR(50)),
+            @InternalFacilityId,
+            'Extract',
+            s.StepNameFull,
+            'P',
+            CAST('2000-12-31T11:59:00' AS datetime2(3)),
+            1,
+            @SourceInstanceServerName,
+            47
+        FROM src s
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM CFG.ProcessStatusFacilityDetail d
+            WHERE d.InternalProductId   = @InternalProductId
+              AND d.InternalClientIds   = CAST(@InternalClientId AS VARCHAR(50))
+              AND d.InternalFacilityId  = @InternalFacilityId
+              AND d.StepType            = 'Extract'
+              AND d.StepName            = s.StepNameFull
+        );
+    END
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+ALTER     PROCEDURE [CFG].[UpdateProcessStatusFacility]
+    @InternalProductId     SMALLINT,
+    @InternalClientId      INT,
+    @InternalFacilityId    INT,
+    @StepName              VARCHAR(100),
+    @Status                CHAR(1),
+    @NewWatermarkValue     DATETIME = NULL,
+    @DataSourceId          INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    -- Case 1: Status = 'C' (Completed) -> Update status AND watermark
+    IF @Status = 'C'
+    BEGIN
+        UPDATE cfg.ProcessStatusFacility
+        SET [Status]              = @Status,
+            WatermarkValue        = COALESCE(@NewWatermarkValue, WatermarkValue),
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+ 
+        UPDATE cfg.ProcessStatusFacilityDetail
+        SET [Status]              = @Status,
+            WatermarkValue        = COALESCE(@NewWatermarkValue, WatermarkValue),
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND StepName            LIKE '%' + @StepName + '%'
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+    END
+ 
+    -- Case 2: Status = 'P' (Processing) -> Update status only (no watermark change)
+    ELSE IF @Status = 'P'
+    BEGIN
+        UPDATE cfg.ProcessStatusFacility
+        SET [Status]              = @Status,
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+ 
+        UPDATE cfg.ProcessStatusFacilityDetail
+        SET [Status]              = @Status,
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND StepName            LIKE '%' + @StepName + '%'
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+    END
+ 
+    -- Case 3: Any other status -> Only update ProcessStatusFacility
+    ELSE
+    BEGIN
+        UPDATE cfg.ProcessStatusFacility
+        SET [Status]              = @Status,
+            [DateTimeLastModified] = GETDATE(),
+            ModifiedByUser        = ORIGINAL_LOGIN()
+        WHERE InternalProductId   = @InternalProductId
+          AND InternalClientIds   = @InternalClientId
+          AND InternalFacilityId  = @InternalFacilityId
+          AND DataSourceId        = @DataSourceId
+          AND StepType            = 'Extract';
+    END
+END
+GO
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+ALTER     PROCEDURE [CFG].[UpdateProcessStatusFacilityDetail] 
+    @InternalProductId     SMALLINT, 
+    @InternalClientId      INT,
+    @InternalFacilityId    INT,
+    @StepName              VARCHAR(100),
+    @Status                CHAR(1),
+    @NewWatermarkValue     DATETIME = NULL,
+    @DataSourceId          INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+ 
+    UPDATE cfg.ProcessStatusFacilityDetail
+    SET [Status] = @Status,
+        [DateTimeLastModified] = GETDATE(),
+        ModifiedByUser         = ORIGINAL_LOGIN()
+    WHERE InternalProductId   = @InternalProductId
+      AND InternalClientIds   = @InternalClientId
+      AND InternalFacilityId  = @InternalFacilityId
+      AND StepName            = @StepName
+      AND DataSourceId        = @DataSourceId
+      AND StepType            = 'Extract';
+END
+GO
+
+	,'prod_analytics'
+	);

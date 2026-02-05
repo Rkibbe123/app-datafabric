@@ -1,0 +1,32 @@
+bundle:
+  name: cla-bundle
+
+sync:
+  include:
+    - notebooks/code/cla/**/*
+  exclude:
+    - '**/.git/**'
+    - '**/.*'
+
+targets:
+  dev:
+    mode: development
+        - **/*
+    workspace:
+      host: https://adb-500175558051214.14.azuredatabricks.net/
+      root_path: /Workspace/code/cla/
+
+  test:
+    mode: production
+    workspace:
+      host: https://adb-4120694154722747.7.azuredatabricks.net
+      root_path: /Workspace/code/cla/
+ 
+  prod:
+  
+    mode: production
+    workspace:
+      host: https://adb-4032343960245573.13.azuredatabricks.net
+      root_path: /Workspace/code/cla/
+
+  

@@ -1,0 +1,127 @@
+# Azure DevOps template for deploying the Databricks bundle
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: databricksResourceId
+    type: string
+  - name: workspaceName
+    type: string
+  - name: databricksHost
+    type: string
+  - name: databricksToken
+    type: string
+  - name: target
+    type: string
+    default: 'dev'
+  - name: repositoryDir
+    type: string
+    default: '$(Build.SourcesDirectory)'
+  - name: deployment_type
+    type: string
+    default: 'datafabric'
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Sync Notebooks'
+    inputs:
+      azureSubscription: ${{ parameters.azureSubscription }}
+      scriptType: ps
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Deploy the bundle
+        $repoDir = "${{ parameters.repositoryDir }}"
+        Write-Host "Repository directory parameter: $repoDir"
+        Write-Host "DATABRICKS_HOST:  ${{ parameters.databricksHost }}"
+        Write-Host "DATABRICKS_TOKEN:  ${{ parameters.databricksToken }}"
+
+        # If repositoryDir looks like it's just the Build.SourcesDirectory, try to find the actual repo
+        if ($repoDir -eq "$(Build.SourcesDirectory)" -or $repoDir -like "*\s") {
+            Write-Host "Searching for databricks.yml in subdirectories..."
+            $foundPath = Get-ChildItem "$(Build.SourcesDirectory)" -Recurse -Filter "databricks.yml" -Force | Select-Object -First 1 -ExpandProperty DirectoryName
+            Get-ChildItem -Path $(Build.SourcesDirectory) -Directory -Recurse | Where-Object { $_.Name -eq 'notebooks'} | Select-Object -First 1
+            if ($foundPath) {
+                $repoDir = $foundPath
+                Write-Host "Found databricks.yml in: $repoDir"
+            }
+        }
+
+        if (Test-Path $repoDir) {
+            Set-Location $repoDir
+            Write-Host "Changed to repository directory: $repoDir"
+        } else {
+            Write-Warning "Repository directory not found: $repoDir"
+            Write-Host "Available directories in Build.SourcesDirectory:"
+            Get-ChildItem "$(Build.SourcesDirectory)" -Directory
+            exit 1
+        }
+
+        Write-Host "Current directory: $(Get-Location)"
+        $databricksYml = Join-Path $repoDir "databricks.yml"
+        $cliConfig = "$repoDir\.databrickscfg"
+
+        $installDir = "$(Build.SourcesDirectory)\databricks-cli"
+        $exePath    = Join-Path $installDir 'databricks.exe'
+        if (-not (Test-Path $exePath)) { throw "Databricks CLI binary not found at $exePath" }
+        $env:PATH = "$($installDir);$env:PATH"
+        & $exePath --version   # should show 0.275.0
+
+        # Remove Azure-specific env vars to avoid dual auth
+        Remove-Item Env:DATABRICKS_AZURE_RESOURCE_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:ARM_CLIENT_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:ARM_CLIENT_SECRET -ErrorAction SilentlyContinue
+        Remove-Item Env:ARM_TENANT_ID -ErrorAction SilentlyContinue
+
+        # Create .databrickscfg in the repo directory
+        @"
+        [DEFAULT]
+        host = ${{ parameters.databricksHost }}
+        token = ${{ parameters.databricksToken }}
+        "@ | Set-Content $cliConfig
+
+        Write-Host "Wrote .databrickscfg file for CLI: $cliConfig"
+        Write-Host "----- CLI CONFIG CONTENTS -----"
+        Get-Content $cliConfig
+        Write-Host "-------------------------------"
+
+        # Explicitly set environment variable so CLI always finds correct config file
+        $env:DATABRICKS_CONFIG_FILE = $cliConfig
+        Write-Host "DATABRICKS_CONFIG_FILE set to $($env:DATABRICKS_CONFIG_FILE)"
+
+        # Ensure the DEFAULT profile is used for CLI (not required for v0.275.0, harmless)
+        $env:DATABRICKS_CONFIG_PROFILE = "DEFAULT"
+
+        if (Test-Path $databricksYml) {
+          Write-Host "databricks.yml found at $databricksYml; running bundle validate/deploy for target '${{ parameters.target }}'."
+          & $exePath bundle validate -t ${{ parameters.target }} -p DEFAULT
+          & $exePath bundle deploy -t ${{ parameters.target }} -p DEFAULT
+        }
+        else {
+          Write-Warning "databricks.yml not found in $repoDir; falling back to workspace import-dir." 
+          $deploymentType = "${{ parameters.deployment_type }}".Trim()
+          $baseDir = "$(Build.SourcesDirectory)".TrimEnd('\\','/')
+          $path = Join-Path $baseDir $deploymentType
+          $path = Join-Path $path "notebooks"
+          $path = Join-Path $path "code"
+          Write-Host "path: $path"
+          $subFolder = (Get-ChildItem -Path $path -Directory | Select-Object -First 1).Name
+          Write-Host "subfolder: $subFolder"
+          $fullPath = Join-Path $path $subFolder
+          Write-Host "fullPath: $fullPath"
+          $deployPath = "/Workspace/code/$subFolder" -replace '\\','/'
+          Write-Host "deployPath: $deployPath"
+          Write-Host "###########################################################################################################"
+          databricks workspace import-dir $fullPath $deployPath  
+        }
+
+        if (Test-Path $cliConfig) {
+          Remove-Item $cliConfig -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleaned up .databrickscfg file for security."
+        }
+
+    env:
+      DATABRICKS_HOST:  ${{ parameters.databricksHost }}
+      DATABRICKS_TOKEN:  ${{ parameters.databricksToken }}
+      DATABRICKS_BUNDLE_TARGET: ${{ parameters.target }}
+      TARGET: ${{ parameters.target }}

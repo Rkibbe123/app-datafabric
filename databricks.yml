@@ -1,0 +1,295 @@
+bundle:
+  name: datafabric-bundle
+
+include:
+  - resources/**/*.*
+
+sync: 
+  include: 
+    - notebooks/code/datafabric/**/*  
+ 
+resources:
+  jobs:
+    LakeflowImplementationScriptJob:
+      name: LakeflowImplementationScriptJob
+      tasks:
+        - task_key: ExecuteCDCLakeflowImplementationScript
+          notebook_task:
+            notebook_path: /notebooks/code/datafabric/implementation/LakeflowImplementationScript.ipynb
+            base_parameters:
+              inputProductId: ""
+              inputClientId: ""
+              inputFacilityId: ""
+              inputInstanceName: ""
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+      queue:
+        enabled: true
+
+    DailyIngestionPipelineJob:
+      name: DailyIngestionPipelineJob
+      tasks:
+        - task_key: ExecuteDailyIngestionPipeline
+          notebook_task:
+            notebook_path: /notebooks/code/datafabric/ingestion/DailyIngestionPipeline.ipynb
+            base_parameters:
+              inputProductId: ""
+              inputClientId: ""
+              inputFacilityId: ""
+              inputInstanceName: ""
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+      queue:
+        enabled: true
+
+    aa_job_sqlcdc_lakeflow_create_ingestion:
+      name: aa_job_sqlcdc_lakeflow_create_ingestion
+      max_concurrent_runs: 10
+      tasks:
+        - task_key: GetConfigGatewayData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigGatewayData
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: ValidateGatewayConfigData
+          depends_on:
+            - task_key: GetConfigGatewayData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/ValidateGatewayConfigData
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: CreateDestinationSchema
+          depends_on:
+            - task_key: ValidateGatewayConfigData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/CreateDestinationSchema
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: CreateGatewayPipeline
+          depends_on:
+            - task_key: CreateDestinationSchema
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/CreateGatewayPipeline
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: GetConfigPipelineData
+          depends_on:
+            - task_key: CreateGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigPipelineData
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: ValidateIngestionConfigData
+          depends_on:
+            - task_key: GetConfigPipelineData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/ValidateIngestionConfigData
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: DelayIngestionCreate
+          depends_on:
+            - task_key: ValidateIngestionConfigData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/DelayIngestionCreate
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: CreateIngestionPipeline
+          depends_on:
+            - task_key: DelayIngestionCreate
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/CreateIngestionPipeline
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: WaitForSnapshotsComplete
+          depends_on:
+            - task_key: CreateIngestionPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/WaitForSnapshotsComplete
+            base_parameters:
+              p_mode: Create
+            source: WORKSPACE
+        - task_key: StartIngestionPipeline
+          depends_on:
+            - task_key: WaitForSnapshotsComplete
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StartIngestionPipeline
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+      queue:
+        enabled: true
+      parameters:
+        - name: p_internal_product_id
+          default: ""
+        - name: p_source_server_name
+          default: ""
+        - name: p_source_database_name
+          default: ""
+        - name: p_internal_client_id
+          default: ""
+        - name: p_internal_facility_id
+          default: ""
+        - name: p_ingestion_pipeline_name
+          default: ""
+      performance_target: PERFORMANCE_OPTIMIZED
+
+    aa_job_sqlcdc_lakeflow_main:
+      name: aa_job_sqlcdc_lakeflow_main
+      max_concurrent_runs: 5
+      tasks:
+        - task_key: GetConfigData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigData
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: CheckExistingPipelineCount
+          depends_on:
+            - task_key: GetConfigData
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.GetConfigData.values.existing_pipeline_config_count}}"
+            right: "0"
+        - task_key: ProcessExistingPipelines
+          depends_on:
+            - task_key: CheckExistingPipelineCount
+              outcome: "true"
+          for_each_task:
+            inputs: "{{tasks.GetConfigData.values.existing_pipeline_config_list}}"
+            concurrency: 10
+            task:
+              task_key: ProcessExistingPipelines_iteration
+              run_job_task:
+                job_id: 91009072870674
+                job_parameters:
+                  p_ingestion_pipeline_name: "{{input}}"
+        - task_key: CheckNewPipelineCount
+          depends_on:
+            - task_key: GetConfigData
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.GetConfigData.values.new_pipeline_config_count}}"
+            right: "0"
+        - task_key: ProcessNewPipelines
+          depends_on:
+            - task_key: CheckNewPipelineCount
+              outcome: "true"
+          for_each_task:
+            inputs: "{{tasks.GetConfigData.values.new_pipeline_config_list}}"
+            concurrency: 10
+            task:
+              task_key: ProcessNewPipelines_iteration
+              run_job_task:
+                job_id: 990128083064433
+                job_parameters:
+                  p_ingestion_pipeline_name: "{{input}}"
+      queue:
+        enabled: true
+      parameters:
+        - name: p_environment
+          default: dev
+        - name: p_internal_client_id
+          default: ""
+        - name: p_internal_facility_id
+          default: ""
+        - name: p_internal_product_id
+          default: "27"
+        - name: p_source_database_name
+          default: ""
+        - name: p_source_server_name
+          default: lewvpalyedb04.nthext.com
+
+    aa_job_sqlcdc_lakeflow_run_ingestion:
+      name: aa_job_sqlcdc_lakeflow_run_ingestion
+      max_concurrent_runs: 10
+      tasks:
+        - task_key: GetConfigPipelineData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigPipelineData
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: StartGatewayPipeline
+          depends_on:
+            - task_key: GetConfigPipelineData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StartGatewayPipeline
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: DelayIngestionStart
+          depends_on:
+            - task_key: StartGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/DelayIngestionStart
+            source: WORKSPACE
+        - task_key: StartIngestionPipeline
+          depends_on:
+            - task_key: DelayIngestionStart
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StartIngestionPipeline
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: StopGatewayPipeline
+          depends_on:
+            - task_key: StartIngestionPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/StopGatewayPipeline
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+        - task_key: GetReconciliationStats
+          depends_on:
+            - task_key: StopGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetReconciliationStats
+            source: WORKSPACE
+        - task_key: RunDataSplit
+          depends_on:
+            - task_key: StopGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/RunDataSplit
+            source: WORKSPACE
+          existing_cluster_id: ${var.cluster_id}
+      queue:
+        enabled: true
+      parameters:
+        - name: p_internal_product_id
+          default: ""
+        - name: p_source_server_name
+          default: ""
+        - name: p_source_database_name
+          default: ""
+        - name: p_internal_client_id
+          default: ""
+        - name: p_internal_facility_id
+          default: ""
+        - name: p_ingestion_pipeline_name
+          default: ""
+      performance_target: PERFORMANCE_OPTIMIZED
+
+variables:
+  cluster_id:
+    description: "Cluster ID for job execution"
+    default: "0121-131344-1rhlzste"
+
+targets:
+  dev:
+    mode: production
+    default: true
+    variables:
+      cluster_id: "0121-131344-1rhlzste"
+    workspace:
+      host: https://adb-7405610504172079.19.azuredatabricks.net/
+      root_path: /Workspace/code/datafabric/
+
+  test:
+    mode: production
+    variables:
+      cluster_id: "1104-233930-ybv0ikdf"
+    workspace:
+      host: https://adb-1604699075379016.16.azuredatabricks.net
+      root_path: /Workspace/code/datafabric/
+
+  prod:
+    mode: production
+    variables:
+      cluster_id: "1031-092338-928f4ke1"
+    workspace:
+      host: https://adb-4032343960245573.13.azuredatabricks.net
+      root_path: /Workspace/pipeline-deployments/${bundle.name}/

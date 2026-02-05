@@ -1,0 +1,19 @@
+name: DailyIngestionPipelineJob
+tasks:
+  - task_key: ExecuteDailyIngestionPipeline
+    notebook_task:
+      notebook_path: /notebooks/code/datafabric/ingestion/DailyIngestionPipeline.ipynb
+      base_parameters:
+        inputProductId: ""
+        inputClientId: ""
+        inputFacilityId: ""
+        inputInstanceName: ""
+      source: WORKSPACE
+    existing_cluster_id: ${var.cluster_id}
+queue:
+  enabled: true
+permissions:
+  - level: CAN_MANAGE
+    user_name: maryno.demesier@nthrive.com
+  - level: CAN_VIEW
+    user_name: randy.kibbe1.ctr@nthrive.com

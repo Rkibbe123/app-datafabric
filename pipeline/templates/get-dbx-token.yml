@@ -1,0 +1,31 @@
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: databricksResourceId
+    type: string
+  - name: databricksHost
+    type: string
+  - name: workspaceName
+    type: string
+   
+
+steps:
+- task: AzureCLI@2
+  displayName: 'Get AAD Token for Databricks'
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    scriptType: 'ps'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      Write-Host "Fetching AAD token for Databricks..."
+      # Resource ID for Azure Databricks Login
+      $aadToken = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+
+      if (-not $aadToken) { throw "Failed to retrieve AAD token!" }
+      
+      # Use the AAD token directly as the DATABRICKS_TOKEN
+      # This avoids 403 errors when Service Principals try to create PATs for themselves
+      Write-Host "##vso[task.setvariable variable=DATABRICKS_TOKEN;issecret=true]$aadToken"
+      Write-Host "DATABRICKS_TOKEN variable set (using AAD Token directly)."

@@ -1,0 +1,635 @@
+parameters:
+  - name: adosOrgName
+    type: string
+    default: finthrive
+  - name: projectName
+    type: string
+    default: $(Build.DefinitionName)
+  - name: buildTemplate
+    type: stepList
+    default:
+      - checkout: Common
+      - checkout: self
+  - name: postBuildStageTemplate
+    type: stageList
+    default: []
+  - name: deploymentTemplate
+    type: stageList
+    default: []
+  - name: runCheckmarx
+    type: boolean
+    default: false
+  - name: runSonar
+    type: boolean
+    default: false
+  - name: pipelineRepoMatch
+    type: boolean
+    default: true
+  - name: solution
+    type: string
+    default: NoSolutionFile
+  - name: scanCheckouts
+    type: stepList
+    default:
+      - checkout: Common
+      - checkout: Self
+  - name: buildTimeout
+    # buildTimeout: Set minutes before build job times out; set "default" to skip setting timeout
+    type: string
+    default: default
+  - name: sonarCli
+    type: boolean
+    default: false
+  - name: treeStyle
+    type: string
+    values:
+      - tree
+      - fullPath
+      - bash
+    default: fullPath
+  - name: secondaryBuildTemplate
+    type: stepList
+    default: []
+  - name: segregated
+    type: object
+    default:
+      - insurance-clearinghouse
+      - claims-manager
+  - name: disableScans
+    type: object
+    default:
+      - ar-optimizer #Temporary until Sq scans are working
+      - documentation #Permanently added due to lack of scannable code.  Do not remove from list when the legacy TU projects are removed
+      - centralized-data-acquisition
+      - insurance-clearinghouse
+      - insurance-discovery
+      - rtech
+      - machine-learning
+      - government-reimbursements
+      - tableau
+      - data-insights
+      - claimshop
+  - name: agentPool
+    type: string
+    default: default
+    values:
+      - windows-latest
+      - windows-2022
+      - windows-2019
+      - ubuntu-latest
+      - self-hosted
+      - self-hosted-nthrive
+      - self-hosted-automated-tests
+      - default
+      - self-hosted-aks-windows
+      - self-hosted-aks-linux
+  - name: extraProperties
+    type: string
+    default: sonar.java.binaries=$(Build.Repository.Name)/target
+  - name: TEMPORARY_SKIP_SCANS_IN_MAIN_AS_OF_4MAY2023_revenue_manager
+    #No longer relevant due to the disableScans parameter, but not removed due to existing pipelines.  Value is now completely ignored
+    type: boolean
+    default: false
+  - name: unitTestTemplate
+    type: stepList
+    default: []
+  - name: unitTestPool
+    type: string
+    default: Azure Pipelines
+  - name: enableKICS
+    type: boolean
+    default: false
+  - name: alternateRepoNameForTesting
+    type: string
+    default: 'N/A'
+  - name: alternatePipelineNameForTesting
+    type: string
+    default: 'N/A'
+  - name: deployment_type
+    type: string
+    default: 'app-datafabric'
+  - name: currentCxImport
+    type: object
+    default: []
+  - name: cleanWorkspace
+    type: string
+    default: 'all'
+    values:
+      - default
+      - all
+      - outputs
+      - resources
+
+stages:
+  - stage: Build
+    jobs:
+      - job: Compile
+        ${{ if ne(parameters.buildTimeout, 'default') }}:
+          timeoutInMinutes: ${{parameters.buildTimeout}}
+        workspace:
+          ${{ if ne(parameters.cleanWorkspace, 'default') }}:
+            clean: ${{parameters.cleanWorkspace}}
+        ${{ if or(ne(parameters.agentPool, 'default'), containsValue(parameters.segregated, variables['System.TeamProject']))}}:
+          ${{ if in(parameters.agentPool, 'windows-latest','windows-2022', 'windows-2019', 'ubuntu-latest') }}:
+            pool: 
+              vmImage: ${{parameters.agentPool}}
+              ${{ if containsValue(parameters.segregated, variables['System.TeamProject']) }}:
+                demands:
+                  - ${{ variables['System.TeamProject'] }}
+          ${{ if eq(parameters.agentPool, 'self-hosted') }}:
+            pool: 
+              name: shared-self-hosted-win22
+              demands:
+                - ${{parameters.agentPool}}-prod
+          ${{ if eq(parameters.agentPool, 'self-hosted-aks-windows') }}:
+            pool: 
+              name: nprod-self-hosted-aks-windows
+          ${{ if eq(parameters.agentPool, 'self-hosted-aks-linux') }}:
+            pool: 
+              name: nprod-self-hosted-aks-linux
+          ${{ if eq(parameters.agentPool, 'self-hosted-nthrive') }}:
+            pool: 
+              name: Legacy nThrive
+          ${{ if eq(parameters.agentPool, 'self-hosted-automated-tests') }}:
+            pool: 
+              name: Automated Tests - quality engineering - On Prem Highlander 
+          ${{ if and(containsValue(parameters.segregated, variables['System.TeamProject']), eq(parameters.agentPool, 'default'))}}:
+            pool:
+              # Bug -- using windows-latest with "demands" currently results in requiring the Windows 2019 pool.
+              vmImage: windows-2022
+              demands:
+                - ${{ variables['System.TeamProject'] }}
+        variables:
+          reposJson: $[ convertToJson(resources.repositories) ]
+        steps:
+          - ${{parameters.buildTemplate}}
+          - template: /components/tasks/pipelineArtifacts.publish.yml
+          - ${{ if ne(length(parameters.unitTestTemplate), 0) }}:
+            - template: /components/tasks/pipelineArtifacts.publish.yml
+              parameters:
+                name: Output
+                target: $(Build.SourcesDirectory)/$(Build.Repository.Name)/Output/
+          - task: powershell@2
+            name: ValidateRepoPipeline
+            #This step is moved from the Prep stage (which will likely be removed) due to need to evaluate all related repos
+            displayName: Validate repo and pipeline names
+            inputs: 
+              targetType: inline
+              script: |
+                function PickPrefix($name)
+                {
+                  $nameParts = $name -split "-"
+                  return $(if($nameParts[0] -eq "tst") {$nameParts[1]} else {$nameParts[0]})
+                }
+
+                $validCharactersPattern = '^[a-z0-9\-]+'
+                $validPrefixPattern = '^(app|lib|db|qa|product|ado|iac|tst|doc|wiki|hack|poc|sbx|int|util|zzz|pom|cfg)'
+                $originalPipelineName = '$(Build.DefinitionName)'
+                $alternatePipelineNameForTesting = '${{parameters.alternatePipelineNameForTesting}}'
+                $projectName = '$(System.TeamProject)'
+                $pipelineName = $(if($projectName.startswith("test-") -and $alternatePipelineNameForTesting -ne 'N/A'){$alternatePipelineNameForTesting} else { $originalPipelineName })
+                $alternateRepoNameForTesting = '${{parameters.alternateRepoNameForTesting}}'
+                $originalSelfRepo = '$(Build.Repository.Name)'
+                $selfRepo = $(if($projectName.startswith("test-") -and $alternateRepoNameForTesting -ne 'N/A'){$alternateRepoNameForTesting} else { $originalSelfRepo })
+                $reposDef = '$(reposJson)' | ConvertFrom-Json
+                $originalNames = $reposDef.PSObject.properties.name | ForEach { $reposDef.$_.name }
+                $modifiedNames = @($originalNames | Where { $_ -ne $originalSelfRepo }) + @($pipelineName, $selfRepo)
+                $names = $modifiedNames | Where { $_ -NotIn @("common-templates", "common-infrastructure") }
+                write-host "Evaluating pipeline and repo names: $names"
+
+                $namesHaveValidCharacters = ($names | ForEach { $_ -cmatch $validCharactersPattern } | Where { -Not $_ }).Length -eq 0
+                write-host "Pipeline and repos have valid characters: $namesHaveValidCharacters"
+
+                $namesHaveValidPrefixes = ($names | ForEach { $_ -cmatch $validPrefixPattern } | Where { -Not $_ }).Length -eq 0
+                write-host "Pipeline and repos have valid prefixes: $namesHaveValidPrefixes"
+
+                $isTestPipeline = $false
+                $pipelineParts = $pipelineName -split "-"
+                $pipelinePrefix = $pipelineParts[0]
+                if($pipelinePrefix -eq "tst" -and $projectName.StartsWith("test"))
+                {
+                  $isTestPipeline = $true
+                  $pipelinePrefix = $pipelineParts[1]
+                }
+                
+                $isTestRepo = $false
+                $repoParts = $selfRepo -split "-"
+                $repoPrefix = $repoParts[0]
+                if($repoPrefix -eq "tst" -and $projectName.StartsWith("test"))
+                {
+                  $isTestRepo = $true
+                  $repoPrefix = $repoParts[1]
+                }
+                
+                $allPrefixes = $names | ForEach {PickPrefix $_} | Select-Object -Unique
+                write-host "Evaluated prefixes: $allPrefixes"                
+                
+                $repoPipelineMatch = ($repoPrefix -eq $pipelinePrefix)
+                write-host "Pipeline and self repo have matching prefix: $repoPipelineMatch"
+
+                $mustScanPrefixes = @("app", "lib", "db", "iac", "int", "util", "pom", "mono")
+                $canDeployPrefixes = @("app", "lib", "db", "ado", "hack", "poc", "sbx", "int", "util", "iac", "pom", "mono", "doc", "cfg")
+                $canDeployMainPrefixes = @("app", "lib", "db", "iac", "pom", "mono", "doc", "cfg")
+
+                $canDeploy = ($allPrefixes | Where { $canDeployPrefixes -notcontains $_ }).Count -eq 0
+                $canDeployMain = ($allPrefixes | Where { $canDeployMainPrefixes -notcontains $_ }).Count -eq 0
+                $mustScan = if($canDeployMain){($allPrefixes | Where {$_ -In $mustScanPrefixes}).Count -gt 0}else{$false}
+                
+                write-host "Pipeline and all repos can deploy: $canDeploy"
+                write-host "Pipeline and all repos can deploy to upper environments: $canDeployMain"
+                write-host "Before deploying to upper environments, scans must be run: $mustScan"
+
+                Write-Output "##vso[task.setvariable variable=IsTestPipeline;isOutput=true]$isTestPipeline"
+                Write-Output "##vso[task.setvariable variable=IsTestRepo;isOutput=true]$isTestRepo"
+                Write-Output "##vso[task.setvariable variable=RepoPipelineMatch;isOutput=true]$repoPipelineMatch"
+                Write-Output "##vso[task.setvariable variable=PipelinePrefix;isOutput=true]$pipelinePrefix"
+                Write-Output "##vso[task.setvariable variable=MustScan;isOutput=true]$mustScan"
+                Write-Output "##vso[task.setvariable variable=CanDeploy;isOutput=true]$canDeploy"
+                Write-Output "##vso[task.setvariable variable=CanDeployMain;isOutput=true]$canDeployMain"
+          - template: /components/tasks/tree.yml
+            parameters:
+              style: ${{parameters.treeStyle}}
+      - ${{ if ne(length(parameters.unitTestTemplate), 0) }}:
+          - ${{ if not(containsValue(parameters.disableScans, variables['System.TeamProject'])) }}:
+              - job: UnitTest
+                dependsOn: Compile
+                timeoutInMinutes: 240
+                displayName: Unit Test
+                ${{ if ne(parameters.unitTestPool, 'Azure Pipelines')}}:
+                  pool: ${{parameters.unitTestPool}}
+                steps:
+                  - checkout: none
+                  - template: /components/tasks/pipelineArtifacts.download.yml
+                    parameters:
+                      artifact: Output
+                      destination: $(Build.SourcesDirectory)/$(Build.Repository.Name)/Output
+                  - ${{parameters.unitTestTemplate}}
+                  - template: /components/tasks/tree.yml
+                    parameters:
+                      style: ${{parameters.treeStyle}}
+                  - template: /components/tasks/tree.yml
+                    parameters:
+                      path: $(Agent.TempDirectory)
+                      style: ${{parameters.treeStyle}}
+                  - template: /components/tasks/pipelineArtifacts.publish.yml
+                    parameters:
+                      name: TestResults
+                      target: $(Agent.TempDirectory)/TestResults
+          - ${{ else }}:
+              - job: TestsDisabled
+                steps:
+                  - checkout: none
+  - stage: SecondaryBuild
+    dependsOn: Build
+    condition: and(succeeded(),${{ne(length(parameters.secondaryBuildTemplate), 0)}})
+    jobs:
+      - job: SecondaryBuild
+        ${{ if or(ne(parameters.agentPool, 'default'), containsValue(parameters.segregated, variables['System.TeamProject']))}}:
+          ${{ if in(parameters.agentPool, 'windows-latest','windows-2022', 'windows-2019', 'ubuntu-latest') }}:
+            pool:
+              vmImage: ${{parameters.agentPool}}
+              ${{ if containsValue(parameters.segregated, variables['System.TeamProject']) }}:
+                demands:
+                  - ${{ variables['System.TeamProject'] }}
+          ${{ if eq(parameters.agentPool, 'self-hosted')}}:
+            pool:
+              name: shared-self-hosted-win22
+              demands:
+                - ${{parameters.agentPool}}-prod
+          ${{ if eq(parameters.agentPool, 'self-hosted-aks-windows') }}:
+            pool: 
+              name: nprod-self-hosted-aks-windows
+          ${{ if eq(parameters.agentPool, 'self-hosted-aks-linux') }}:
+            pool: 
+              name: nprod-self-hosted-aks-linux
+          ${{ if eq(parameters.agentPool, 'self-hosted-nthrive') }}:
+            pool: 
+              name: Legacy nThrive
+          ${{ if eq(parameters.agentPool, 'self-hosted-automated-tests') }}:
+            pool: 
+              name: Automated Tests - quality engineering - On Prem Highlander    
+          ${{ if and(containsValue(parameters.segregated, variables['System.TeamProject']), eq(parameters.agentPool, 'default'))}}:
+            pool:
+              # Bug -- using windows-latest with "demands" currently results in requiring the Windows 2019 pool.
+              vmImage: windows-2022
+              demands:
+                - ${{ variables['System.TeamProject'] }}
+        steps:
+          - ${{parameters.secondaryBuildTemplate}}
+          - template: /components/tasks/tree.yml
+            parameters:
+              style: ${{parameters.treeStyle}}
+  - ${{ if not(containsValue(parameters.currentCxImport, variables['System.TeamProject'])) }}:
+      - template: scans.yml
+        parameters:
+          runCheckmarx: ${{parameters.runCheckmarx}}
+          runSonar: ${{parameters.runSonar}}
+          solution: ${{parameters.solution}}
+          projectName: ${{parameters.projectName}}
+          adosOrgName: ${{parameters.adosOrgName}}
+          buildTemplate: ${{parameters.buildTemplate}}
+          unitTestTemplate: ${{parameters.unitTestTemplate}}
+          pipelineRepoMatch: ${{parameters.pipelineRepoMatch}}
+          scanCheckouts: ${{parameters.scanCheckouts}}
+          sonarCli: ${{parameters.sonarCli}}
+          treeStyle: ${{parameters.treeStyle}}
+          extraProperties: ${{parameters.extraProperties}}
+          disableScans: ${{parameters.disableScans}}
+          agentPool: ${{parameters.agentPool}}
+          enableKICS: ${{parameters.enableKICS}}
+  - ${{ if parameters.postBuildStageTemplate }}:
+    - ${{parameters.postBuildStageTemplate}}
+  - ${{ if parameters.deploymentTemplate }}:
+      - ${{parameters.deploymentTemplate}}
+
+  - stage: BuildDEVDataBricks
+    displayName: "Build DEV Data Bricks"
+    condition: always()
+
+    variables:
+      - group: databricks-dab-pipeline
+
+    jobs:
+      - job: Initial_config
+        displayName: 'Databricks_Config'
+
+        steps:
+          # Conditional checkout based on deployment type
+          - checkout: self
+            displayName: 'Checkout Pipeline Repository'
+            clean: true
+
+          - checkout: app-datafabric
+            condition: eq('${{ parameters.deployment_type }}', 'app-datafabric')
+            displayName: 'Checkout datafabric Repository'
+            clean: true
+
+          - checkout: app-claimsanalyzer
+            condition: eq('${{ parameters.deployment_type }}', 'app-claimsanalyzer')
+            displayName: 'Checkout Claims Repository (feature branch)'
+            clean: true
+
+          - checkout: app-contractanalyzer
+            condition: eq('${{ parameters.deployment_type }}', 'app-contractanalyzer')
+            displayName: 'Checkout Contract Repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.x'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          # Install Databricks CLI with error handling
+          - task: UsePythonVersion@0
+            displayName: 'Download latest DBX CLI'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - template: /components/tasks/install-dbx-cli.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          # Get DBX_HOST & RESOUCEID
+          - template: /components/tasks/get-dbx-config.yml
+            parameters:
+              #azureSubscription: $(DevazureServiceConnection)
+              azureSubscription: 'nprod-dev'
+              resourceGroup: $(dev-databricks-rg-name)
+              workspaceName: $(dev-databricks-wksp-name)
+
+          # GET DBX TOKEN
+          - template: /components/tasks/get-dbx-token.yml
+            parameters:
+              azureSubscription: 'nprod-dev'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DEV-DATABRICKS-URL)"
+              resourceGroup: $(dev-databricks-rg-name)
+              workspaceName: $(dev-databricks-wksp-name)
+
+          # Set working dir based on parameter
+          - template: /components/tasks/set-dbx-dir.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          # Validate bundle
+          #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
+          - template: /components/tasks/validate-dbx-bundle.yml
+            parameters:
+              azureSubscription: 'nprod-dev'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: "$(dev-databricks-rg-name)"
+              workspaceName: "$(dev-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              deployment_type: "${{ parameters.deployment_type }}"
+              target: dev
+
+          # Post-deployment smoke test: Run a Databricks notebook to verify deployment
+          #- template: components/tasks/run-dbx-smoketest.yml
+          # parameters:
+          #    azureSubscription: nprod-dev
+          #    databricksHost: $(DATABRICKS_HOST)
+          #    smokeTestJobId: $(SMOKE_TEST_JOB_ID)
+
+  - stage: BuildQAEDataBricks
+    displayName: "Build QAE Data Bricks"
+    dependsOn: BuildDEVDataBricks
+    condition: succeeded('BuildDEVDataBricks')
+
+    variables:
+      - group: databricks-dab-pipeline
+
+    jobs:
+      - job: wait_for_qa_signoff
+        displayName: Wait for QA signoff
+        pool: server         # agentless job
+        timeoutInMinutes: 4320
+        steps:
+          - task: ManualValidation@0
+            displayName: Manual validation
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: |
+                Randy.Kibb1e1.ctr@finthrive.com
+              instructions: |
+                Please review the build artifacts and configuration.
+                Click RESUME to proceed, or REJECT to stop.
+              onTimeout: reject
+
+      - job: Initial_config
+        displayName: 'Databricks_Config'
+        dependsOn: wait_for_qa_signoff
+
+        pool:
+          name: 'shared-self-hosted-win22'
+          demands:
+            - Agent.Name -equals 20230720000032-1
+
+        steps:
+          - checkout: app-datafabric
+            condition: eq('${{ parameters.deployment_type }}', 'app-datafabric')
+            displayName: 'Checkout datafabric Repository'
+            clean: true
+
+          - checkout: app-claimsanalyzer
+            condition: eq('${{ parameters.deployment_type }}', 'app-claimsanalyzer')
+            displayName: 'Checkout Claims Repository (feature branch)'
+            clean: true
+
+          - checkout: app-contractanalyzer
+            condition: eq('${{ parameters.deployment_type }}', 'app-contractanalyzer')
+            displayName: 'Checkout Contract Repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.x'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          # Install Databricks CLI with error handling
+          - task: UsePythonVersion@0
+            displayName: 'Download latest DBX CLI'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - template: /components/tasks/install-dbx-cli.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: /components/tasks/get-dbx-config.yml
+            parameters:
+              #azureSubscription: $(DevazureServiceConnection)
+              azureSubscription: 'nprod-qae'
+              resourceGroup: $(qae-databricks-rg-name)
+              workspaceName: $(qae-databricks-wksp-name)
+
+          - template: /components/tasks/get-dbx-token.yml
+            parameters:
+              azureSubscription: 'nprod-qae'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: $(qae-databricks-rg-name)
+              workspaceName: $(qae-databricks-wksp-name)
+
+          - template: /components/tasks/set-dbx-dir.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: /components/tasks/validate-dbx-bundle.yml
+            parameters:
+              azureSubscription: 'nprod-qae'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              resourceGroup: "$(qae-databricks-rg-name)"
+              workspaceName: "$(qae-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              deployment_type: "${{ parameters.deployment_type }}"
+              target: test
+
+  - stage: BuildPRODDataBricks
+    displayName: "Build PROD Data Bricks"
+    dependsOn: BuildQAEDataBricks
+    #condition: succeeded('BuildQAEDataBricks')
+    condition: false
+
+    variables:
+      - group: databricks-dab-pipeline
+
+    jobs:
+      - job: wait_for_prod_signoff
+        displayName: Wait for PROD signoff
+        pool: server         # agentless job
+        timeoutInMinutes: 4320
+        steps:
+          - task: ManualValidation@0
+            displayName: Manual validation
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: |
+                Randy.Kibb1e1.ctr@finthrive.com
+              instructions: |
+                Please review the build artifacts and configuration.
+                Click RESUME to proceed, or REJECT to stop.
+              onTimeout: reject
+
+      - job: Initial_config
+        displayName: 'Databricks_Config'
+        #dependsOn: waitForValidation
+
+        pool:
+          name: 'shared-self-hosted-win22'
+          demands:
+            - Agent.Name -equals 20230720000032-1
+
+        steps:
+          - checkout: app-datafabric
+            condition: eq('${{ parameters.deployment_type }}', 'app-datafabric')
+            displayName: 'Checkout datafabric Repository'
+            clean: true
+
+          - checkout: app-claimsanalyzer
+            condition: eq('${{ parameters.deployment_type }}', 'app-claimsanalyzer')
+            displayName: 'Checkout Claims Repository (feature branch)'
+            clean: true
+
+          - checkout: app-contractanalyzer
+            condition: eq('${{ parameters.deployment_type }}', 'app-contractanalyzer')
+            displayName: 'Checkout Contract Repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.x'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          # Install Databricks CLI with error handling
+          - task: UsePythonVersion@0
+            displayName: 'Download latest DBX CLI'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - template: /components/tasks/install-dbx-cli.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: /components/tasks/get-dbx-config.yml
+            parameters:
+              #azureSubscription: $(DevazureServiceConnection)
+              azureSubscription: 'prod'
+              resourceGroup: $(prod-databricks-rg-name)
+              workspaceName: $(prod-databricks-wksp-name)
+
+          - template: /components/tasks/get-dbx-token.yml
+            parameters:
+              azureSubscription: 'prod'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: $(prod-databricks-rg-name)
+              workspaceName: $(prod-databricks-wksp-name)
+
+          - template: /components/tasks/set-dbx-dir.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
+          - template: /components/tasks/validate-dbx-bundle.yml
+            parameters:
+              azureSubscription: 'prod'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              resourceGroup: "$(prod-databricks-rg-name)"
+              workspaceName: "$(prod-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              deployment_type: "${{ parameters.deployment_type }}"
+              target: test
+    
+

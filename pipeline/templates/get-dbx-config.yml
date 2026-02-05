@@ -1,0 +1,36 @@
+# Azure DevOps template for getting Databricks config
+
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: workspaceName
+    type: string
+ 
+steps:
+- task: AzureCLI@2
+  displayName: 'get DBX Config'
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    addSpnToEnvironment: true
+    scriptType: ps
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      Write-Host "resource-group: ${{ parameters.resourceGroup }}"
+      Write-Host "workspaceName: ${{ parameters.workspaceName }}"
+      Remove-Item Env:DATABRICKS_HOST -ErrorAction SilentlyContinue
+      $workspaceInfo = az databricks workspace show --resource-group ${{ parameters.resourceGroup }} --name ${{ parameters.workspaceName }} --output json | ConvertFrom-Json
+      
+      $DATABRICKS_HOST = "https://$($workspaceInfo.workspaceUrl)"
+      $DATABRICKS_AZURE_RESOURCE_ID = $workspaceInfo.id
+      
+      Write-Host "DATABRICKS_HOST: $DATABRICKS_HOST"
+      Write-Host "DATABRICKS_AZURE_RESOURCE_ID: $DATABRICKS_AZURE_RESOURCE_ID"
+      
+      echo "##vso[task.setvariable variable=DATABRICKS_HOST]$DATABRICKS_HOST"
+      echo "##vso[task.setvariable variable=DATABRICKS_AZURE_RESOURCE_ID]$DATABRICKS_AZURE_RESOURCE_ID"
+      Write-Host "DATABRICKS_HOST: $($env:DATABRICKS_HOST)"
+      #Write-Host "display spn account"
+      #az ad sp list --display-name nprod-analytics-dev-spn --query "[].{objectId:id,appId:appId,displayName:displayName}" -o table
+       

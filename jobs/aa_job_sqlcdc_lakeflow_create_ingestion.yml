@@ -1,0 +1,68 @@
+resources:
+  jobs:
+    aa_job_sqlcdc_lakeflow_create_ingestion:
+      name: aa_job_sqlcdc_lakeflow_create_ingestion
+      max_concurrent_runs: 10
+      tasks:
+        - task_key: GetConfigGatewayData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigGatewayData
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: ValidateGatewayConfigData
+          depends_on:
+            - task_key: GetConfigGatewayData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/ValidateGatewayConfigData
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: CreateDestinationSchema
+          depends_on:
+            - task_key: ValidateGatewayConfigData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/CreateDestinationSchema
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: CreateGatewayPipeline
+          depends_on:
+            - task_key: CreateDestinationSchema
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/CreateGatewayPipeline
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: GetConfigPipelineData
+          depends_on:
+            - task_key: CreateGatewayPipeline
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/GetConfigPipelineData
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: ValidateIngestionConfigData
+          depends_on:
+            - task_key: GetConfigPipelineData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/ValidateIngestionConfigData
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+        - task_key: CreateIngestionPipeline
+          depends_on:
+            - task_key: ValidateIngestionConfigData
+          notebook_task:
+            notebook_path: /Workspace/code/datafabric/lakeflow/notebooks/job-tasks/CreateIngestionPipeline
+            source: WORKSPACE
+          existing_cluster_id: 1031-092338-928f4ke1
+      queue:
+        enabled: true
+      parameters:
+        - name: p_internal_product_id
+          default: ""
+        - name: p_source_server_name
+          default: ""
+        - name: p_source_database_name
+          default: ""
+        - name: p_internal_client_id
+          default: ""
+        - name: p_internal_facility_id
+          default: ""
+        - name: p_ingestion_pipeline_name
+          default: ""

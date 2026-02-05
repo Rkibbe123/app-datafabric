@@ -1,0 +1,19 @@
+resources:
+  jobs:
+    LakeflowImplementationScriptJob:
+      name: LakeflowImplementationScriptJob
+      tasks:
+        - task_key: ExecuteCDCLakeflowImplementationScript
+          notebook_task:
+            notebook_path: /Repos/common/app-analyzercommon/notebooks/code/common/CDCLakeflow/LakeflowImplementationScript
+            base_parameters:
+              inputProductId: ""
+              inputClientId: ""
+              inputFacilityId: ""
+              inputInstanceName: ""
+            source: WORKSPACE
+          existing_cluster_id: 1030-085003-7t2jw3i5
+      queue:
+        enabled: true
+      run_as:
+        user_name: svc_analytics@nthrive.com

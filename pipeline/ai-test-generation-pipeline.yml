@@ -1,0 +1,310 @@
+# AI Test Generation Pipeline for Databricks Notebooks
+# This pipeline demonstrates how to integrate AI-powered test generation into your CI/CD workflow
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - notebooks/**
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - notebooks/**
+
+parameters:
+  - name: deployment_type
+    displayName: 'Select Deployment Type'
+    type: string
+    default: 'app-datafabric'
+    values:
+      - app-datafabric
+      - app-claimsanalyzer
+      - app-contractanalyzer
+  
+  - name: generate_ai_tests
+    displayName: 'Generate AI-Powered Tests'
+    type: boolean
+    default: true
+  
+  - name: notebooks_path
+    displayName: 'Notebooks Path to Analyze'
+    type: string
+    default: 'notebooks/code/datafabric'
+  
+  - name: specific_notebook
+    displayName: 'Specific Notebook (leave empty for all)'
+    type: string
+    default: ''
+
+variables:
+  - group: databricks-dab-pipeline
+  # Add these to your variable group or define here:
+  # - name: azureServiceConnection
+  #   value: 'your-service-connection'
+  # - name: keyVaultName
+  #   value: 'your-keyvault-name'
+
+stages:
+  # Stage 1: AI Test Generation (conditional)
+  - ${{ if eq(parameters.generate_ai_tests, true) }}:
+    - stage: AITestGeneration
+      displayName: 'AI-Powered Test Generation'
+      jobs:
+        - job: GenerateTests
+          displayName: 'Generate Tests from Notebooks'
+          pool:
+            vmImage: 'ubuntu-latest'
+          
+          steps:
+            - checkout: self
+              displayName: 'Checkout Repository'
+              clean: true
+
+            - task: UsePythonVersion@0
+              displayName: 'Use Python 3.10'
+              inputs:
+                versionSpec: '3.10'
+                addToPath: true
+
+            - script: |
+                pip install -r $(Build.SourcesDirectory)/pipeline/scripts/requirements-ai-tests.txt
+              displayName: 'Install Python Dependencies'
+
+            # Get Azure OpenAI credentials from Key Vault
+            - task: AzureKeyVault@2
+              displayName: 'Get Azure OpenAI Secrets'
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                KeyVaultName: '$(keyVaultName)'
+                SecretsFilter: 'azure-openai-endpoint,azure-openai-api-key'
+                RunAsPreJob: false
+
+            # Generate tests using AI
+            - script: |
+                echo "======================================"
+                echo "Starting AI Test Generation"
+                echo "======================================"
+                
+                NOTEBOOK_ARG=""
+                if [ -n "${{ parameters.specific_notebook }}" ]; then
+                  NOTEBOOK_ARG="--single-notebook $(Build.SourcesDirectory)/${{ parameters.specific_notebook }}"
+                fi
+                
+                python $(Build.SourcesDirectory)/pipeline/scripts/ai_test_generator.py \
+                  --notebooks-path "$(Build.SourcesDirectory)/${{ parameters.notebooks_path }}" \
+                  --output-dir "$(Build.SourcesDirectory)/generated_tests" \
+                  --pattern "**/*.ipynb" \
+                  $NOTEBOOK_ARG
+                
+                echo "======================================"
+                echo "Test Generation Complete!"
+                echo "======================================"
+                ls -la $(Build.SourcesDirectory)/generated_tests/
+              displayName: 'Generate Tests with Azure OpenAI'
+              env:
+                AZURE_OPENAI_ENDPOINT: $(azure-openai-endpoint)
+                AZURE_OPENAI_API_KEY: $(azure-openai-api-key)
+                AZURE_OPENAI_DEPLOYMENT: 'gpt-4'
+
+            # Publish generated tests as artifact
+            - task: PublishBuildArtifacts@1
+              displayName: 'Publish Generated Tests'
+              inputs:
+                PathtoPublish: '$(Build.SourcesDirectory)/generated_tests'
+                ArtifactName: 'AIGeneratedTests'
+                publishLocation: 'Container'
+
+        - job: ValidateGeneratedTests
+          displayName: 'Validate Generated Tests (Syntax Check)'
+          dependsOn: GenerateTests
+          pool:
+            vmImage: 'ubuntu-latest'
+          
+          steps:
+            - task: UsePythonVersion@0
+              inputs:
+                versionSpec: '3.10'
+
+            - task: DownloadBuildArtifacts@1
+              displayName: 'Download Generated Tests'
+              inputs:
+                buildType: 'current'
+                downloadType: 'single'
+                artifactName: 'AIGeneratedTests'
+                downloadPath: '$(Build.SourcesDirectory)'
+
+            - script: |
+                pip install pytest pyspark
+                
+                echo "Validating Python syntax of generated tests..."
+                
+                cd $(Build.SourcesDirectory)/AIGeneratedTests
+                
+                # Check syntax of all generated test files
+                for file in test_*.py; do
+                  if [ -f "$file" ]; then
+                    echo "Checking: $file"
+                    python -m py_compile "$file" && echo "  ✓ Syntax OK" || echo "  ✗ Syntax Error"
+                  fi
+                done
+                
+                # Collect tests without running them
+                pytest --collect-only . || true
+                
+              displayName: 'Validate Test Syntax'
+
+  # Stage 2: Run Generated Tests (if enabled)
+  - ${{ if eq(parameters.generate_ai_tests, true) }}:
+    - stage: RunAITests
+      displayName: 'Execute AI-Generated Tests'
+      dependsOn: AITestGeneration
+      condition: succeeded()
+      jobs:
+        - job: ExecuteTests
+          displayName: 'Run Generated Tests'
+          pool:
+            vmImage: 'ubuntu-latest'
+          
+          steps:
+            - checkout: self
+
+            - task: UsePythonVersion@0
+              inputs:
+                versionSpec: '3.10'
+
+            - task: DownloadBuildArtifacts@1
+              inputs:
+                buildType: 'current'
+                downloadType: 'single'
+                artifactName: 'AIGeneratedTests'
+                downloadPath: '$(Build.SourcesDirectory)'
+
+            - script: |
+                pip install pytest pytest-cov pyspark unittest-xml-reporting
+              displayName: 'Install Test Dependencies'
+
+            - script: |
+                cd $(Build.SourcesDirectory)/AIGeneratedTests
+                
+                # Create conftest.py with common fixtures if not exists
+                if [ ! -f "conftest.py" ]; then
+                  cat > conftest.py << 'EOF'
+                import pytest
+                from unittest.mock import MagicMock, patch
+                
+                @pytest.fixture(scope="session")
+                def spark():
+                    """Mock SparkSession for testing."""
+                    mock_spark = MagicMock()
+                    mock_spark.sql.return_value = MagicMock()
+                    mock_spark.read.return_value = MagicMock()
+                    mock_spark.createDataFrame.return_value = MagicMock()
+                    return mock_spark
+                
+                @pytest.fixture
+                def dbutils():
+                    """Mock dbutils for Databricks widget testing."""
+                    mock_dbutils = MagicMock()
+                    mock_dbutils.widgets.get.return_value = "test_value"
+                    mock_dbutils.notebook.run.return_value = "{\"status\": \"success\"}"
+                    return mock_dbutils
+                
+                @pytest.fixture
+                def sample_df(spark):
+                    """Create a sample DataFrame for testing."""
+                    return spark.createDataFrame.return_value
+                EOF
+                fi
+                
+                # Run tests
+                pytest . \
+                  --junitxml=test-results.xml \
+                  --cov=. \
+                  --cov-report=xml:coverage.xml \
+                  -v \
+                  --tb=short \
+                  || true  # Don't fail - generated tests may need review
+                
+              displayName: 'Execute AI-Generated Tests'
+
+            - task: PublishTestResults@2
+              displayName: 'Publish Test Results'
+              inputs:
+                testResultsFormat: 'JUnit'
+                testResultsFiles: '**/test-results.xml'
+                searchFolder: '$(Build.SourcesDirectory)/AIGeneratedTests'
+                mergeTestResults: true
+                failTaskOnFailedTests: false
+                testRunTitle: 'AI Generated Tests - ${{ parameters.deployment_type }}'
+
+  # Stage 3: Regular Build (your existing pipeline continues)
+  - stage: BuildDEVDataBricks
+    displayName: "Build DEV Data Bricks"
+    ${{ if eq(parameters.generate_ai_tests, true) }}:
+      dependsOn: RunAITests
+      condition: succeeded()
+    ${{ else }}:
+      condition: always()
+
+    variables:
+      - group: databricks-dab-pipeline
+
+    jobs:
+      - job: Initial_config
+        displayName: 'Databricks_Config'
+        pool:
+          vmImage: 'windows-latest'
+
+        steps:
+          - checkout: self
+            displayName: 'Checkout Pipeline Repository'
+            clean: true
+            path: app-datafabric
+
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.x'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - template: templates/install-dbx-cli.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: templates/get-dbx-config.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              resourceGroup: $(dev-databricks-rg-name)
+              workspaceName: $(dev-databricks-wksp-name)
+
+          - template: templates/get-dbx-token.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: $(dev-databricks-rg-name)
+              workspaceName: $(dev-databricks-wksp-name)
+
+          - template: templates/set-dbx-dir.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: templates/validate-dbx-bundle.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: "$(dev-databricks-rg-name)"
+              workspaceName: "$(dev-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              deployment_type: "${{ parameters.deployment_type }}"
+              target: dev

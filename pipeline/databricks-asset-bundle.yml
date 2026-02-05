@@ -1,0 +1,603 @@
+parameters:
+  - name: deployment_type
+    displayName: 'Select Deployment Type'
+    type: string
+    default: 'app-datafabric'
+    values:
+      - app-datafabric
+      - app-claimsanalyzer
+      - app-contractanalyzer
+  - name: clean_bundle-root
+    type: boolean
+    default: false
+  - name: generate_ai_tests
+    displayName: 'Generate AI Tests for Notebooks (WARNING: Can take 20+ minutes)'
+    type: boolean
+    default: false
+  - name: notebooks_path
+    displayName: 'Notebooks Path for AI Test Generation'
+    type: string
+    default: 'notebooks/code/datafabric'
+  - name: run_ai_code_review
+    displayName: 'Run AI Code Review & Security Scan'
+    type: boolean
+    default: true
+  - name: fail_on_critical
+    displayName: 'Fail Pipeline on Critical Security Issues'
+    type: boolean
+    default: false
+  - name: run_smoke_test
+    displayName: 'Run AI-Validated Smoke Test'
+    type: boolean
+    default: true
+  - name: run_resource_optimization
+    displayName: 'Run AI Resource Optimization Analysis'
+    type: boolean
+    default: true
+
+stages:
+  # ========================================
+  # AI Code Review & Security Scan Stage
+  # ========================================
+  - stage: AICodeReview
+    displayName: "AI Code Review & Security Scan"
+    condition: eq('${{ parameters.run_ai_code_review }}', 'true')
+
+    variables:
+      - group: databricks-dab-pipeline
+      - name: azureOpenAIEndpoint
+        value: 'https://rkibbe-chat-demo-resource.services.ai.azure.com/api/projects/rkibbe-chat-demo/applications/azure-devops-ai-agent/protocols/openai/responses?api-version=2025-11-15-preview'
+      - name: azureOpenAIDeployment
+        value: 'cicd-ai-agent'
+      # Security: Enable secure argument handling to prevent secret exposure in logs
+      - name: SYSTEM_ENABLEACCESSTOKEN
+        value: 'true'
+      - name: VSO_PROCESS_SECURE_ARGUMENTS
+        value: 'true'
+
+    jobs:
+      - job: CodeReviewAndSecurityScan
+        displayName: 'AI Code Review & Security Analysis'
+        pool:
+          vmImage: 'ubuntu-latest'
+
+        steps:
+          - template: templates/ai-code-review.yml
+            parameters:
+              azureServiceConnection: 'azure-devops-sp2'
+              azureOpenAIEndpoint: '$(azureOpenAIEndpoint)'
+              azureOpenAIDeployment: '$(azureOpenAIDeployment)'
+              notebooks_path: '${{ parameters.notebooks_path }}'
+              failOnCritical: ${{ parameters.fail_on_critical }}
+
+  # ========================================
+  # DEV Build Stage
+  # ========================================
+  - stage: BuildDEVDataBricks
+    displayName: "Build DEV Data Bricks"
+    dependsOn: 
+      - ${{ if eq(parameters.run_ai_code_review, true) }}:
+        - AICodeReview
+    condition: |
+      and(
+        not(failed()),
+        not(canceled())
+      )
+
+    variables:
+      - group: databricks-dab-pipeline
+      - name: azureOpenAIEndpoint
+        value: 'https://rkibbe-chat-demo-resource.services.ai.azure.com/api/projects/rkibbe-chat-demo/applications/azure-devops-ai-agent/protocols/openai/responses?api-version=2025-11-15-preview'
+      - name: azureOpenAIDeployment
+        value: 'cicd-ai-agent'
+      # Security: Enable secure argument handling to prevent secret exposure in logs
+      - name: SYSTEM_ENABLEACCESSTOKEN
+        value: 'true'
+      - name: VSO_PROCESS_SECURE_ARGUMENTS
+        value: 'true'
+
+    jobs:
+      - job: Initial_config
+        displayName: 'Databricks_Config'
+        pool:
+          vmImage: 'windows-latest'
+
+        steps:
+          # Conditional checkout based on deployment type
+          - checkout: self
+            displayName: 'Checkout Pipeline Repository'
+            clean: true
+            path: app-datafabric
+
+           
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.x'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          # Install Databricks CLI with error handling
+          - task: UsePythonVersion@0
+            displayName: 'Download latest DBX CLI'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - template: templates/install-dbx-cli.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          # Get DBX_HOST & RESOUCEID
+          - template: templates/get-dbx-config.yml
+            parameters:
+              #azureSubscription: $(DevazureServiceConnection)
+              azureSubscription: 'azure-devops-sp2'
+              resourceGroup: $(dev-databricks-rg-name)
+              workspaceName: $(dev-databricks-wksp-name)
+
+          # GET DBX TOKEN
+          - template: templates/get-dbx-token.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: $(dev-databricks-rg-name)
+              workspaceName: $(dev-databricks-wksp-name)
+
+          # AI-Driven Resource Optimization Analysis
+          - template: templates/ai-resource-optimization.yml
+            parameters:
+              azureServiceConnection: 'azure-devops-sp2'
+              databricksHost: '$(DATABRICKS_HOST)'
+              databricksToken: '$(DATABRICKS_TOKEN)'
+              azureOpenAIEndpoint: '$(azureOpenAIEndpoint)'
+              azureOpenAIDeployment: '$(azureOpenAIDeployment)'
+              enabled: ${{ parameters.run_resource_optimization }}
+
+          # Set working dir based on parameter
+          - template: templates/set-dbx-dir.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          # Validate bundle
+          #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
+          - template: templates/validate-dbx-bundle.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: "$(dev-databricks-rg-name)"
+              workspaceName: "$(dev-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              deployment_type: "${{ parameters.deployment_type }}"
+              target: dev
+
+          # AI Test Generation for Notebooks
+          - template: templates/generate-ai-tests.yml
+            parameters:
+              notebooks_path: '${{ parameters.notebooks_path }}'
+              output_dir: 'generated_tests'
+              azureServiceConnection: 'azure-devops-sp2'
+              azureOpenAIEndpoint: '$(azureOpenAIEndpoint)'
+              azureOpenAIDeployment: '$(azureOpenAIDeployment)'
+              enabled: ${{ parameters.generate_ai_tests }}
+              maxNotebooks: 3  # Limit to 3 for testing
+
+          # AI-Validated Smoke Test
+          - template: templates/ai-smoke-test.yml
+            parameters:
+              azureServiceConnection: 'azure-devops-sp2'
+              databricksHost: '$(DATABRICKS_HOST)'
+              databricksToken: '$(DATABRICKS_TOKEN)'
+              azureOpenAIEndpoint: '$(azureOpenAIEndpoint)'
+              azureOpenAIDeployment: '$(azureOpenAIDeployment)'
+              notebooks_path: '${{ parameters.notebooks_path }}'
+              target: 'dev'
+              enabled: ${{ parameters.run_smoke_test }}
+
+
+  - stage: BuildQAEDataBricks
+    displayName: "Build QAE Data Bricks"
+    dependsOn: BuildDEVDataBricks
+    condition: false
+
+    variables:
+      - group: databricks-dab-pipeline
+
+    jobs:
+      - job: wait_for_qa_signoff
+        displayName: Wait for QA signoff
+        pool: server         # agentless job
+        timeoutInMinutes: 4320
+        steps:
+          - task: ManualValidation@0
+            displayName: Manual validation
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: |
+                Randy.Kibb1e1.ctr@finthrive.com
+              instructions: |
+                Please review the build artifacts and configuration.
+                Click RESUME to proceed, or REJECT to stop.
+              onTimeout: reject
+
+      - job: Initial_config
+        displayName: 'Databricks_Config'
+        dependsOn: wait_for_qa_signoff
+        pool:
+          vmImage: 'windows-latest'
+
+        steps:
+          # Conditional checkout based on deployment type
+          - checkout: self
+            displayName: 'Checkout Pipeline Repository'
+            clean: true
+            path: app-datafabric
+
+           
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.x'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          # Install Databricks CLI with error handling
+          - task: UsePythonVersion@0
+            displayName: 'Download latest DBX CLI'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - template: templates/install-dbx-cli.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: templates/get-dbx-config.yml
+            parameters:
+              #azureSubscription: $(DevazureServiceConnection)
+              azureSubscription: 'azure-devops-sp2'
+              resourceGroup: $(qae-databricks-rg-name)
+              workspaceName: $(qae-databricks-wksp-name)
+
+          - template: templates/get-dbx-token.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: $(qae-databricks-rg-name)
+              workspaceName: $(qae-databricks-wksp-name)
+
+          - template: templates/set-dbx-dir.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: templates/validate-dbx-bundle.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              resourceGroup: "$(qae-databricks-rg-name)"
+              workspaceName: "$(qae-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              deployment_type: "${{ parameters.deployment_type }}"
+              target: test
+          
+          - template: templates/delete-dbx-folder.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: "$(dev-databricks-rg-name)"
+              workspaceName: "$(dev-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              target: test
+              clean_bundle-root: "${{ parameters['clean_bundle-root'] }}"
+
+  - stage: BuildPRODDataBricks
+    displayName: "Build PROD Data Bricks"
+    dependsOn: BuildQAEDataBricks
+    #condition: succeeded('BuildQAEDataBricks')
+    condition: false
+
+    variables:
+      - group: databricks-dab-pipeline
+
+    jobs:
+      - job: wait_for_prod_signoff
+        displayName: Wait for PROD signoff
+        pool: server         # agentless job
+        timeoutInMinutes: 4320
+        steps:
+          - task: ManualValidation@0
+            displayName: Manual validation
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: |
+                Randy.Kibb1e1.ctr@finthrive.com
+              instructions: |
+                Please review the build artifacts and configuration.
+                Click RESUME to proceed, or REJECT to stop.
+              onTimeout: reject
+
+      - job: Initial_config
+        displayName: 'Databricks_Config'
+        #dependsOn: waitForValidation
+        pool:
+          vmImage: 'windows-latest'
+
+        steps:
+          # Conditional checkout based on deployment type
+          - checkout: self
+            displayName: 'Checkout Pipeline Repository'
+            clean: true
+            path: app-datafabric
+
+           
+          - task: UsePythonVersion@0
+            displayName: 'Use Python 3.x'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          # Install Databricks CLI with error handling
+          - task: UsePythonVersion@0
+            displayName: 'Download latest DBX CLI'
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - template: templates/install-dbx-cli.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          - template: templates/get-dbx-config.yml
+            parameters:
+              #azureSubscription: $(DevazureServiceConnection)
+              azureSubscription: 'azure-devops-sp2'
+              resourceGroup: $(prod-databricks-rg-name)
+              workspaceName: $(prod-databricks-wksp-name)
+
+          - template: templates/get-dbx-token.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: $(prod-databricks-rg-name)
+              workspaceName: $(prod-databricks-wksp-name)
+
+          - template: templates/set-dbx-dir.yml
+            parameters:
+              deployment_type: '${{ parameters.deployment_type }}'
+
+          #- ${{ if eq(parameters.deployment_type, 'app-datafabric') }}:
+          - template: templates/validate-dbx-bundle.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksResourceId: "$(DATABRICKS_AZURE_RESOURCE_ID)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              resourceGroup: "$(prod-databricks-rg-name)"
+              workspaceName: "$(prod-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              deployment_type: "${{ parameters.deployment_type }}"
+              target: test
+          
+          - template: templates/delete-dbx-folder.yml
+            parameters:
+              azureSubscription: 'azure-devops-sp2'
+              databricksToken: "$(DATABRICKS_TOKEN)"
+              databricksHost: "$(DATABRICKS_HOST)"
+              resourceGroup: "$(dev-databricks-rg-name)"
+              workspaceName: "$(dev-databricks-wksp-name)"
+              repositoryDir: "$(REPO_DIR)"
+              target: test
+              clean_bundle-root: "${{ parameters['clean_bundle-root'] }}"
+
+  - stage: PostBuildAIAnalysis
+    displayName: "AI-Powered Post-Build Analysis"
+    dependsOn:
+      - BuildDEVDataBricks
+    condition: always()
+
+    variables:
+      - group: databricks-dab-pipeline
+      - name: azureOpenAIEndpoint
+        value: 'https://rkibbe-chat-demo-resource.services.ai.azure.com/api/projects/rkibbe-chat-demo/applications/azure-devops-ai-agent/protocols/openai/responses?api-version=2025-11-15-preview'
+      - name: azureOpenAIDeployment
+        value: 'cicd-ai-agent'
+      # Security: Enable secure argument handling to prevent secret exposure in logs
+      - name: SYSTEM_ENABLEACCESSTOKEN
+        value: 'true'
+      - name: VSO_PROCESS_SECURE_ARGUMENTS
+        value: 'true'
+
+    jobs:
+      - job: AILogAnalysis
+        displayName: 'AI Log Analysis'
+        pool:
+          vmImage: 'windows-latest'
+
+        steps:
+          - checkout: none
+            displayName: 'Skip Checkout'
+
+          - task: AzureCLI@2
+            name: AnalyzeBuildLogs
+            displayName: 'AI Analysis of Build Logs'
+            inputs:
+              azureSubscription: 'azure-devops-sp2'
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                Write-Host "=== AI-Powered Build Log Analysis ===" -ForegroundColor Cyan
+                
+                # Azure DevOps REST API to fetch build logs
+                $orgUrl = "$(System.CollectionUri)"
+                $project = "$(System.TeamProject)"
+                $buildId = "$(Build.BuildId)"
+                
+                Write-Host "Fetching build logs for Build ID: $buildId"
+                
+                # Get PAT or use System.AccessToken
+                $token = "$(System.AccessToken)"
+                $headers = @{
+                    "Authorization" = "Bearer $token"
+                    "Content-Type" = "application/json"
+                }
+                
+                # Get build timeline (contains all tasks and their logs)
+                $timelineUrl = "${orgUrl}${project}/_apis/build/builds/${buildId}/timeline?api-version=7.1"
+                $timeline = Invoke-RestMethod -Uri $timelineUrl -Headers $headers -Method Get
+                
+                # Collect logs from failed or warning tasks
+                $logContent = @()
+                $logContent += "=== BUILD SUMMARY ==="
+                $logContent += "Build: $(Build.BuildNumber)"
+                $logContent += "Branch: $(Build.SourceBranch)"
+                $logContent += "Deployment Type: ${{ parameters.deployment_type }}"
+                $logContent += ""
+                
+                foreach ($record in $timeline.records | Where-Object { $_.type -eq "Task" }) {
+                    $taskName = $record.name
+                    $taskResult = $record.result
+                    $taskState = $record.state
+                    
+                    $logContent += "--- Task: $taskName | Result: $taskResult ---"
+                    
+                    # Fetch actual log content for failed/warning tasks or all tasks
+                    if ($record.log.url) {
+                        try {
+                            $taskLog = Invoke-RestMethod -Uri $record.log.url -Headers $headers -Method Get
+                            # Truncate long logs to avoid token limits
+                            $logLines = $taskLog -split "`n" | Select-Object -Last 100
+                            $logContent += $logLines -join "`n"
+                        } catch {
+                            $logContent += "(Could not fetch log)"
+                        }
+                    }
+                    $logContent += ""
+                }
+                
+                # Combine and truncate to fit token limits (~15000 chars)
+                $combinedLogs = ($logContent -join "`n")
+                if ($combinedLogs.Length -gt 15000) {
+                    $combinedLogs = $combinedLogs.Substring(0, 15000) + "`n... [truncated]"
+                }
+                
+                Write-Host "Collected $($combinedLogs.Length) characters of log data"
+                
+                $prompt = @"
+                You are a DevOps expert analyzing Azure DevOps build logs for a Databricks Asset Bundle deployment pipeline.
+                
+                **Analyze these build logs and provide:**
+                
+                1. **Error Analysis**
+                   - Identify any errors or failures
+                   - Root cause analysis
+                   - Specific remediation steps
+                
+                2. **Warning Review**
+                   - List all warnings found
+                   - Assess severity and impact
+                
+                3. **Performance Issues**
+                   - Long-running tasks
+                   - Inefficient patterns
+                
+                4. **Best Practice Recommendations**
+                   - Code improvements
+                   - Pipeline optimization
+                   - Security concerns
+                
+                5. **Error Handling Improvements**
+                   - Missing try/catch blocks
+                   - Insufficient logging
+                   - Missing validation
+                
+                **Format:** Use 🔴 Critical, 🟡 Warning, 🟢 Info, 💡 Suggestion prefixes.
+                
+                **BUILD LOGS:**
+                $combinedLogs
+                "@
+                
+                # Get Azure AD token for Azure AI Services
+                $aiToken = az account get-access-token --resource https://ml.azure.com --query accessToken -o tsv
+                
+                $body = @{
+                    model = "$(azureOpenAIDeployment)"
+                    input = $prompt
+                } | ConvertTo-Json -Depth 10
+                
+                $uri = "$(azureOpenAIEndpoint)"
+                
+                Write-Host "Sending logs to AI for analysis..."
+                
+                try {
+                    $response = Invoke-RestMethod -Uri $uri `
+                        -Method POST `
+                        -Headers @{
+                            "Authorization" = "Bearer $aiToken"
+                            "Content-Type" = "application/json"
+                        } `
+                        -Body $body
+                    
+                    # Debug: Show response structure
+                    Write-Host "Response received. Parsing..."
+                    
+                    # Handle different response formats from Azure AI Services
+                    $analysis = $null
+                    
+                    # Format 1: Responses API format (output[].content[].text)
+                    if ($response.output -and $response.output[0].content) {
+                        $analysis = $response.output[0].content[0].text
+                    }
+                    # Format 2: Chat completions format (choices[].message.content)
+                    elseif ($response.choices -and $response.choices[0].message) {
+                        $analysis = $response.choices[0].message.content
+                    }
+                    # Format 3: Simple text response
+                    elseif ($response.text) {
+                        $analysis = $response.text
+                    }
+                    # Format 4: Direct content property
+                    elseif ($response.content) {
+                        $analysis = $response.content
+                    }
+                    # Format 5: Response might be a string
+                    elseif ($response -is [string]) {
+                        $analysis = $response
+                    }
+                    else {
+                        # Debug: dump response structure to understand the format
+                        Write-Host "##[debug]Response structure: $($response | ConvertTo-Json -Depth 5 -Compress)"
+                        Write-Host "##vso[task.logissue type=warning]Unexpected response format from AI endpoint"
+                        $analysis = "Unable to parse AI response. Raw response logged for debugging."
+                    }
+                    
+                    if ($analysis) {
+                        Write-Host ""
+                        Write-Host "========================================" -ForegroundColor Cyan
+                        Write-Host "       AI BUILD LOG ANALYSIS            " -ForegroundColor Cyan
+                        Write-Host "========================================" -ForegroundColor Cyan
+                        Write-Host ""
+                        Write-Host $analysis
+                        Write-Host ""
+                        Write-Host "========================================" -ForegroundColor Cyan
+                        
+                        # Flag critical issues in pipeline
+                        if ($analysis -match "🔴") {
+                            Write-Host "##vso[task.logissue type=error]Critical issues detected - review AI analysis above"
+                        }
+                        if ($analysis -match "🟡") {
+                            Write-Host "##vso[task.logissue type=warning]Warnings detected - review AI analysis above"
+                        }
+                    }
+                    
+                } catch {
+                    Write-Host "##vso[task.logissue type=warning]AI Analysis failed: $_"
+                    Write-Host "Error details: $($_.Exception.Message)"
+                }
+
+

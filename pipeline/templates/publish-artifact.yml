@@ -1,0 +1,15 @@
+# Azure DevOps template for publishing build artifacts
+parameters:
+  - name: PathtoPublish
+    type: string
+    default: '$(Build.ArtifactStagingDirectory)'
+  - name: ArtifactName
+    type: string
+    default: 'databricks'
+
+steps:
+- task: PublishBuildArtifacts@1
+  displayName: Store release artifact
+  inputs:
+    PathtoPublish: ${{ parameters.PathtoPublish }}
+    ArtifactName: ${{ parameters.ArtifactName }}
