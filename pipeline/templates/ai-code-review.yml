@@ -32,7 +32,7 @@ steps:
       addToPath: true
 
   - script: |
-      pip install bandit
+      pip install bandit==1.8.3
     displayName: 'Install Security Scanning Tools'
 
   # Run security pattern scan first (entire repo)

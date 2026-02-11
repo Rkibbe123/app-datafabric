@@ -1,5 +1,6 @@
 # requirements for AI test generation
-openai>=1.0.0
-pytest>=7.0.0
-pytest-cov>=4.0.0
-pyspark>=3.4.0
+# Pin exact versions for reproducibility and vulnerability scanning (osv-scanner)
+openai==1.66.3
+pytest==8.3.4
+pytest-cov==6.0.0
+pyspark==3.5.4

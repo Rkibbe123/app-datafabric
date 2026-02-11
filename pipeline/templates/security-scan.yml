@@ -17,7 +17,7 @@ steps:
       addToPath: true
 
   - script: |
-      pip install bandit semgrep
+      pip install bandit==1.8.3 semgrep==1.112.0
     displayName: 'Install Security Tools'
 
   - script: |
