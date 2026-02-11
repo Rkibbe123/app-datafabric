@@ -86,7 +86,7 @@ steps:
           try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-            Install-Module powershell-yaml -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            Install-Module powershell-yaml -RequiredVersion 0.4.12 -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
             Import-Module powershell-yaml -ErrorAction Stop
           } catch {
             Write-Error "Failed to install/import powershell-yaml: $($_.Exception.Message)"; exit 1
